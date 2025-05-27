@@ -1,0 +1,96 @@
+azure:
+  openai:
+    endpoint: ${AZURE_OPENAI_ENDPOINT}
+    api_key: ${AZURE_OPENAI_API_KEY}
+    embedding_endpoint: ${AZURE_OPENAI_EMBEDDING_ENDPOINT}
+    embedding_key: ${AZURE_OPENAI_EMBEDDING_KEY}
+    api_version: "2024-02-15-preview"
+    models:
+      chat: "gpt-4o"
+      embedding: "text-embedding-3-large"
+  
+  storage:
+    connection_string: ${BLOB_CONNECTION_STRING}
+    container_name: "prediction-artifacts"
+
+bigquery:
+  project_id: "enterprise-dashboardnp-cd35"
+  credentials_path: ${GOOGLE_APPLICATION_CREDENTIALS}
+  datasets:
+    embeddings: "bigquery_datasets_spoke_oa_dev"
+    results: "bigquery_datasets_hone_srv_dev"
+    preprocessing: "preprocessing_pipeline"
+  tables:
+    incidents: "incidents_table"
+    preprocessed: "preprocessed_incidents"
+    embeddings: "embeddings_table"
+    results: "clustering_results"
+
+clustering:
+  hdbscan:
+    min_cluster_size: 25
+    min_samples: 5
+  umap:
+    n_components: 50
+    n_neighbors: 100
+    min_dist: 0.1
+  embedding:
+    weights:
+      entity: 0.0      # Set to 0 as requested
+      action: 0.0      # Set to 0 as requested  
+      semantic: 1.0    # Only semantic embedding
+    batch_size: 25
+  max_domains: 20
+
+pipeline:
+  save_to_local: true
+  result_path: "/home/azureuser/cloudfiles/code/result_output"
+  use_checkpointing: true
+  
+  # Training schedule - quarterly
+  training_schedule:
+    quarters: ["q1", "q2", "q3", "q4"]
+    months: 
+      q1: [1, 2, 3]
+      q2: [4, 5, 6] 
+      q3: [7, 8, 9]
+      q4: [10, 11, 12]
+  
+  # Tech center configuration
+  tech_centers:
+    - "BT-TC-Product Development & Engineering"
+    - "BT-TC-Infrastructure Services"
+    - "BT-TC-Network Operations"
+    - "BT-TC-Security Operations"
+    - "BT-TC-Cloud Services"
+    - "BT-TC-Data Analytics"
+    - "BT-TC-Enterprise Applications"
+    - "BT-TC-Field Services"
+    - "BT-TC-Customer Support"
+    - "BT-TC-Quality Assurance"
+    - "BT-TC-DevOps Engineering"
+    - "BT-TC-Business Intelligence"
+    - "BT-TC-Systems Integration"
+    - "BT-TC-Mobile Solutions"
+    - "BT-TC-Compliance & Governance"
+  
+  # Processing schedules
+  preprocessing:
+    frequency_minutes: 60  # Every hour
+    batch_size: 1000
+  
+  prediction:
+    frequency_minutes: 120  # Every 2 hours  
+    batch_size: 500
+    
+  # Parallel processing
+  parallel_training: true
+  max_workers: 4
+
+# Blob storage structure template
+blob_storage:
+  structure:
+    models: "models/{tech_center}/{year}/{quarter}"
+    predictions: "predictions/{tech_center}/{year}/{quarter}"
+    monitoring: "monitoring/{tech_center}"
+    preprocessing: "preprocessing/{tech_center}/{year}/{quarter}"

@@ -1,0 +1,52 @@
+azure:
+  openai_endpoint: ${AZURE_OPENAI_ENDPOINT}
+  openai_api_key: ${AZURE_OPENAI_API_KEY}
+  openai_embedding_endpoint: ${AZURE_OPENAI_EMBEDDING_ENDPOINT}
+  openai_embedding_key: ${AZURE_OPENAI_EMBEDDING_KEY}
+  chat_model: "gpt-4o"
+  embedding_model: "text-embedding-3-large"
+  api_version: "2024-02-01"
+  blob_connection_string: ${BLOB_CONNECTION_STRING}
+  container_name: "prediction-artifacts"
+
+bigquery:
+  project_id: "enterprise-dashboardnp-cd35"
+  embeddings_dataset: "bigquery_datasets_spoke_oa_dev"
+  results_dataset: "bigquery_datasets_hone_srv_dev"
+  service_account_key_path: ${GOOGLE_APPLICATION_CREDENTIALS}
+
+clustering:
+  min_cluster_size: 25
+  min_samples: 5
+  umap_n_components: 50
+  umap_n_neighbors: 100
+  umap_min_dist: 0.1
+  max_domains: 20
+
+embedding:
+  entity_weight: 0.0
+  action_weight: 0.0
+  semantic_weight: 1.0
+  batch_size: 25
+
+pipeline:
+  save_to_local: true
+  result_path: "c:/Users/Bachn/OneDrive/Desktop/my_projects/hdbscan/results"
+  use_checkpointing: true
+
+tech_centers:
+  - "BT-TC-Product Development & Engineering"
+  - "BT-TC-Infrastructure Services"
+  - "BT-TC-Application Development"
+  - "BT-TC-Data Analytics"
+  - "BT-TC-Network Operations"
+  - "BT-TC-Security Services"
+  - "BT-TC-Database Management"
+  - "BT-TC-Cloud Services"
+  - "BT-TC-Mobile Applications"
+  - "BT-TC-Integration Services"
+  - "BT-TC-Quality Assurance"
+  - "BT-TC-DevOps Engineering"
+  - "BT-TC-Business Intelligence"
+  - "BT-TC-Enterprise Architecture"
+  - "BT-TC-User Experience"
