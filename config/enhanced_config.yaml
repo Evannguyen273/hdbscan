@@ -94,3 +94,43 @@ blob_storage:
     predictions: "predictions/{tech_center}/{year}/{quarter}"
     monitoring: "monitoring/{tech_center}"
     preprocessing: "preprocessing/{tech_center}/{year}/{quarter}"
+
+# Logging and Notification Configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  handlers:
+    console:
+      enabled: true
+      level: "INFO"
+    
+    file:
+      enabled: true
+      path: "logs/"
+      max_size: "100MB"
+      backup_count: 5
+    
+    azure_monitor:
+      enabled: false
+      workspace_id: "${AZURE_WORKSPACE_ID}"
+
+notifications:
+  email:
+    enabled: false  # Set to true to enable email notifications
+    smtp_server: "smtp.company.com"
+    smtp_port: 587
+    from: "pipeline@company.com"
+    recipients: 
+      - "admin@company.com"
+      - "team@company.com"
+    username: "${EMAIL_USERNAME}"
+    password: "${EMAIL_PASSWORD}"
+    
+  teams:
+    enabled: false  # Set to true to enable Teams notifications
+    webhook_url: "${TEAMS_WEBHOOK_URL}"
+    
+  azure_monitor:
+    enabled: false  # Set to true to enable Azure Monitor alerts
+    alert_rule_id: "${AZURE_ALERT_RULE_ID}"

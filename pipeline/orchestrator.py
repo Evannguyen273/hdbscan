@@ -1,6 +1,7 @@
 import logging
 import schedule
 import time
+import os
 from datetime import datetime
 from typing import Dict
 
@@ -37,6 +38,81 @@ class PipelineOrchestrator:
         self.logger = logging.getLogger(__name__)
     
     def run_preprocessing(self):
+        """Run preprocessing pipeline for all tech centers"""
+        try:
+            self.logger.info("=== STARTING PREPROCESSING PIPELINE ===")
+            
+            # Run preprocessing for all tech centers
+            results = self.preprocessing_pipeline.run_preprocessing_all_tech_centers()
+            
+            # Log comprehensive results with failed incidents
+            self.logger.info(f"Preprocessing completed: {results['successful']}/{results['total_tech_centers']} tech centers successful")
+            self.logger.info(f"Total incidents processed: {results['total_processed']}")
+            
+            if results.get('total_failed_incidents', 0) > 0:
+                self.logger.warning(f"FAILED INCIDENTS: {results['total_failed_incidents']} incidents failed summarization")
+                self.logger.warning(f"Failed incident numbers: {results.get('failed_incident_numbers', [])}")
+                
+                # Create alert for failed incidents
+                self._create_failed_incidents_alert(results)
+            
+            self.logger.info("=== PREPROCESSING PIPELINE COMPLETED ===")
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Preprocessing pipeline failed: {e}")
+            raise
+    
+    def _create_failed_incidents_alert(self, results: Dict):
+        """Create an alert/notification for failed incidents that need investigation"""
+        try:
+            failed_incidents = results.get('failed_incident_numbers', [])
+            
+            if not failed_incidents:
+                return
+            
+            alert_message = f"""
+PREPROCESSING ALERT: Failed Incident Summarization
+
+Summary:
+- Total failed incidents: {len(failed_incidents)}
+- Failed incident numbers: {', '.join(map(str, failed_incidents))}
+- Timestamp: {results.get('timestamp', 'Unknown')}
+
+Action Required:
+1. Check incident details in ServiceNow for these numbers
+2. Review error logs in preprocessing/failed_incidents/ directory
+3. Determine if manual processing or data cleanup is needed
+
+Tech Center Details:
+"""
+            
+            for tech_result in results.get('results', []):
+                if tech_result.get('failed_incidents'):
+                    alert_message += f"- {tech_result['tech_center']}: {len(tech_result['failed_incidents'])} failed\n"
+            
+            # Log the alert
+            self.logger.warning("=" * 60)
+            self.logger.warning("FAILED INCIDENTS ALERT")
+            self.logger.warning("=" * 60)
+            self.logger.warning(alert_message)
+            self.logger.warning("=" * 60)
+            
+            # Save alert to file for external monitoring
+            if hasattr(self.config.pipeline, 'save_to_local') and self.config.pipeline.save_to_local:
+                alert_dir = f"{self.config.pipeline.result_path}/preprocessing/alerts"
+                os.makedirs(alert_dir, exist_ok=True)
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                alert_file = f"{alert_dir}/failed_incidents_alert_{timestamp}.txt"
+                
+                with open(alert_file, "w") as f:
+                    f.write(alert_message)
+                
+                self.logger.info(f"Failed incidents alert saved to {alert_file}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to create alert for failed incidents: {e}")
         """Run preprocessing pipeline"""
         self.logger.info("=== STARTING PREPROCESSING PIPELINE ===")
         try:

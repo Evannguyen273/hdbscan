@@ -35,8 +35,8 @@ clustering_pipeline/
 ├── utils/
 │   ├── __init__.py
 │   └── file_utils.py             # File operation utilities
-├── main_enhanced.py              # Enhanced CLI entry point
-├── pipeline.py                   # Legacy pipeline (original)
+├── main.py                       # Enhanced CLI entry point
+├── pipeline.py                   # Original modular pipeline
 └── requirements_enhanced.txt     # All dependencies
 ```
 
@@ -96,47 +96,194 @@ pipeline:
   max_workers: 4
 ```
 
-### 3. Run Pipelines
+### 3. How to Run the Pipeline
 
-#### Preprocessing (Hourly)
+#### **Option A: Enhanced Pipeline (main.py) - RECOMMENDED**
+
+The enhanced pipeline supports tech centers, quarterly training, and Azure Functions architecture.
+
+##### **Individual Pipeline Commands:**
 ```bash
-# All tech centers
-python main_enhanced.py preprocess
+# Preprocessing (detect new incidents, generate embeddings)
+python main.py preprocess
 
-# Specific tech center
-python main_enhanced.py preprocess --tech-center "BT-TC-Product Development & Engineering"
+# Training (quarterly model retraining for all tech centers)
+python main.py train --year 2024 --quarter q4
+
+# Prediction (classify incidents using trained models)
+python main.py predict
+
+# Check pipeline status
+python main.py status
 ```
 
-#### Training (Quarterly)
+##### **Specific Tech Center Operations:**
 ```bash
-# All tech centers (parallel)
-python main_enhanced.py train
+# Process single tech center
+python main.py preprocess --tech-center "BT-TC-Product Development & Engineering"
 
-# Specific tech center
-python main_enhanced.py train --tech-center "BT-TC-Infrastructure Services" --year 2024 --quarter q1
+# Train single tech center
+python main.py train --tech-center "BT-TC-Infrastructure Services" --year 2024 --quarter q1
 
-# Current quarter
-python main_enhanced.py train --year 2024 --quarter q3
+# Predict for single tech center
+python main.py predict --tech-center "BT-TC-Network Operations"
 ```
 
-#### Prediction (Every 2 hours)
+##### **Automated Scheduler (Production Mode):**
 ```bash
-# All tech centers
-python main_enhanced.py predict
+# Run continuous automated pipeline (recommended for production)
+python main.py schedule
+```
+This runs:
+- Preprocessing every 1 hour
+- Prediction every 2 hours  
+- Manual quarterly training
 
-# Specific tech center
-python main_enhanced.py predict --tech-center "BT-TC-Network Operations"
+##### **Legacy Support:**
+```bash
+# Run original pipeline through enhanced interface
+python main.py legacy \
+  --query "SELECT * FROM incidents WHERE created_date >= '2024-01-01'" \
+  --dataset "test_dataset" \
+  --embeddings-table "project.dataset.embeddings" \
+  --results-table "project.dataset.results"
 ```
 
-#### Automated Scheduler
+#### **Option B: Original Modular Pipeline (pipeline.py)**
+
+The original pipeline for traditional stage-by-stage execution without tech center support.
+
+##### **Complete Pipeline:**
 ```bash
-# Run continuous scheduler
-python main_enhanced.py schedule
+# Run full pipeline (all 4 stages)
+python -c "
+from pipeline import ClusteringPipeline
+pipeline = ClusteringPipeline('config/config.yaml')
+results = pipeline.run_modular_pipeline(
+    input_query='SELECT * FROM your_table LIMIT 1000',
+    embeddings_table_id='project.dataset.embeddings',
+    results_table_id='project.dataset.results', 
+    dataset_name='test_run'
+)
+print('Pipeline completed successfully!')
+"
 ```
 
-#### Status Check
+##### **Stage-by-Stage Execution:**
 ```bash
-python main_enhanced.py status
+# Stage 1: Generate embeddings only
+python -c "
+from pipeline import ClusteringPipeline
+pipeline = ClusteringPipeline()
+results = pipeline.run_modular_pipeline(
+    input_query='SELECT * FROM your_table',
+    embeddings_table_id='project.dataset.embeddings',
+    results_table_id=None,
+    dataset_name='test_run',
+    start_from_stage=1,
+    end_at_stage=1
+)
+"
+
+# Stage 2: Train HDBSCAN (using existing embeddings)
+python -c "
+from pipeline import ClusteringPipeline
+pipeline = ClusteringPipeline()
+results = pipeline.run_modular_pipeline(
+    input_query='',
+    embeddings_table_id=None,
+    results_table_id=None,
+    dataset_name='test_run',
+    start_from_stage=2,
+    end_at_stage=2
+)
+"
+
+# Stage 3: Analyze clusters
+python -c "
+from pipeline import ClusteringPipeline
+pipeline = ClusteringPipeline()
+results = pipeline.run_modular_pipeline(
+    input_query='',
+    embeddings_table_id=None,
+    results_table_id=None,
+    dataset_name='test_run',
+    start_from_stage=3,
+    end_at_stage=3
+)
+"
+
+# Stage 4: Save results to BigQuery
+python -c "
+from pipeline import ClusteringPipeline
+pipeline = ClusteringPipeline()
+results = pipeline.run_modular_pipeline(
+    input_query='',
+    embeddings_table_id=None,
+    results_table_id='project.dataset.results',
+    dataset_name='test_run',
+    start_from_stage=4,
+    end_at_stage=4
+)
+"
+```
+
+##### **Custom Parameters:**
+```bash
+# Run with custom parameters
+python -c "
+from pipeline import ClusteringPipeline
+pipeline = ClusteringPipeline()
+results = pipeline.run_modular_pipeline(
+    input_query='SELECT number, short_description, description FROM incidents WHERE tech_center = \"BT-TC-Product Development\"',
+    embeddings_table_id='project.dataset.embeddings',
+    results_table_id='project.dataset.results',
+    dataset_name='product_dev_analysis',
+    summary_path='path/to/precomputed_summaries.parquet',
+    write_disposition='WRITE_TRUNCATE',
+    start_from_stage=1,
+    end_at_stage=4,
+    use_checkpoint=True
+)
+"
+```
+
+### 4. Which Pipeline to Choose?
+
+| Use Case | Recommended Pipeline | Command |
+|----------|---------------------|---------|
+| **Production Deployment** | Enhanced (`main.py`) | `python main.py schedule` |
+| **Tech Center Management** | Enhanced (`main.py`) | `python main.py train --tech-center "..."` |
+| **Quarterly Training** | Enhanced (`main.py`) | `python main.py train --quarter q4` |
+| **Azure Functions** | Enhanced (`main.py`) | Individual pipeline functions |
+| **Research/Development** | Original (`pipeline.py`) | Stage-by-stage execution |
+| **Custom Queries** | Original (`pipeline.py`) | Full parameter control |
+| **Legacy Support** | Enhanced (`main.py`) | `python main.py legacy ...` |
+
+### 5. Typical Workflows
+
+#### **Production Workflow (Enhanced):**
+```bash
+# 1. Start automated scheduler
+python main.py schedule
+
+# 2. Quarterly training (manual)
+python main.py train --year 2024 --quarter q4
+
+# 3. Monitor status
+python main.py status
+```
+
+#### **Development Workflow (Original):**
+```bash
+# 1. Test with small dataset
+python -c "from pipeline import ClusteringPipeline; ..." 
+
+# 2. Analyze specific stages
+python -c "..." --start_from_stage=2 --end_at_stage=3
+
+# 3. Full production run
+python -c "..." --start_from_stage=1 --end_at_stage=4
 ```
 
 ## 📁 Blob Storage Structure

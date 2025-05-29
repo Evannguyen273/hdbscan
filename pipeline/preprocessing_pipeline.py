@@ -93,24 +93,37 @@ class PreprocessingPipeline:
         logging.info(f"Found {len(df)} new incidents for {tech_center}")
         
         return df
-    
-    def process_incidents_batch(self, df: pd.DataFrame, tech_center: str) -> pd.DataFrame:
+      def process_incidents_batch(self, df: pd.DataFrame, tech_center: str) -> Tuple[pd.DataFrame, Dict]:
         """Process a batch of incidents to generate summaries and embeddings"""
         
         if df.empty:
-            return df
+            return df, {"status": "empty"}
         
         logging.info(f"Processing {len(df)} incidents for {tech_center}")
         
-        # Generate combined summaries
-        combined_summaries, fallback_stats = self.text_processor.process_incident_for_embedding_batch(
+        # Generate combined summaries (no fallbacks - failed incidents will be skipped)
+        combined_summaries, summarization_stats = self.text_processor.process_incident_for_embedding_batch(
             df, batch_size=self.config.pipeline.preprocessing.batch_size
         )
-        df['combined_incidents_summary'] = combined_summaries
+        
+        # Filter DataFrame to only include successfully summarized incidents
+        successful_indices = combined_summaries.index
+        successful_df = df.loc[successful_indices].copy()
+        successful_df['combined_incidents_summary'] = combined_summaries
+        
+        if successful_df.empty:
+            logging.warning(f"No incidents were successfully processed for {tech_center}")
+            return pd.DataFrame(), {
+                "status": "all_failed",
+                "summarization_stats": summarization_stats,
+                "failed_incidents": list(self.text_processor.failed_incidents)
+            }
+        
+        logging.info(f"Successfully summarized {len(successful_df)}/{len(df)} incidents for {tech_center}")
         
         # Generate embeddings (only semantic as per config)
         df_with_embeddings, classification_result, embedding_stats = self.embedding_generator.create_hybrid_embeddings(
-            df, text_column='combined_incidents_summary'
+            successful_df, text_column='combined_incidents_summary'
         )
         
         # Select only required columns for storage
@@ -126,12 +139,22 @@ class PreprocessingPipeline:
         processed_df['processed_at'] = datetime.now()
         processed_df['processing_version'] = '1.0'
         
-        return processed_df
-    
-    def save_preprocessed_data(self, df: pd.DataFrame, tech_center: str):
+        # Compile comprehensive stats
+        processing_stats = {
+            "status": "success",
+            "total_input_incidents": len(df),
+            "successfully_processed": len(processed_df),
+            "summarization_stats": summarization_stats,
+            "embedding_stats": embedding_stats,
+            "failed_incidents": list(self.text_processor.failed_incidents)
+        }
+        
+        return processed_df, processing_stats
+      def save_preprocessed_data(self, df: pd.DataFrame, tech_center: str, processing_stats: Dict):
         """Save preprocessed data to BigQuery table"""
         
         if df.empty:
+            logging.warning(f"No data to save for {tech_center}")
             return
         
         try:
@@ -147,13 +170,48 @@ class PreprocessingPipeline:
                 # Update watermark with the latest sys_created_on
                 latest_timestamp = df['sys_created_on'].max()
                 self.update_watermark_timestamp(tech_center, latest_timestamp)
+                
+                # Log any failed incidents for monitoring
+                if processing_stats.get("failed_incidents"):
+                    failed_incidents = processing_stats["failed_incidents"]
+                    logging.warning(f"Failed to process {len(failed_incidents)} incidents for {tech_center}: {failed_incidents}")
+                    
+                    # Save failed incidents report to separate location for investigation
+                    self._save_failed_incidents_report(tech_center, processing_stats)
             else:
                 logging.error(f"Failed to save preprocessed data for {tech_center}")
                 
         except Exception as e:
             logging.error(f"Error saving preprocessed data for {tech_center}: {e}")
     
-    def run_preprocessing_for_tech_center(self, tech_center: str) -> Dict:
+    def _save_failed_incidents_report(self, tech_center: str, processing_stats: Dict):
+        """Save a detailed report of failed incidents for investigation"""
+        try:
+            if self.config.pipeline.save_to_local:
+                output_dir = f"{self.config.pipeline.result_path}/preprocessing/failed_incidents"
+                os.makedirs(output_dir, exist_ok=True)
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                report_file = f"{output_dir}/failed_incidents_{tech_center}_{timestamp}.json"
+                
+                # Get detailed failure report from text processor
+                detailed_report = self.text_processor.get_failed_incidents_report()
+                
+                report = {
+                    "tech_center": tech_center,
+                    "timestamp": datetime.now().isoformat(),
+                    "processing_stats": processing_stats,
+                    "detailed_failures": detailed_report
+                }
+                
+                with open(report_file, "w") as f:
+                    import json
+                    json.dump(report, f, indent=2)
+                
+                logging.info(f"Saved failed incidents report to {report_file}")
+        except Exception as e:
+            logging.error(f"Failed to save failed incidents report: {e}")
+      def run_preprocessing_for_tech_center(self, tech_center: str) -> Dict:
         """Run preprocessing for a single tech center"""
         
         start_time = time.time()
@@ -172,24 +230,37 @@ class PreprocessingPipeline:
                     "tech_center": tech_center,
                     "status": "success",
                     "processed_count": 0,
+                    "failed_incidents": [],
                     "runtime_seconds": time.time() - start_time
                 }
             
             # Process incidents
-            processed_data = self.process_incidents_batch(new_incidents, tech_center)
+            processed_data, processing_stats = self.process_incidents_batch(new_incidents, tech_center)
             
-            # Save to BigQuery
-            self.save_preprocessed_data(processed_data, tech_center)
+            # Save to BigQuery (even if some incidents failed)
+            self.save_preprocessed_data(processed_data, tech_center, processing_stats)
             
             runtime = time.time() - start_time
-            logging.info(f"Preprocessing completed for {tech_center} in {runtime:.2f} seconds")
             
-            return {
+            # Prepare comprehensive result
+            result = {
                 "tech_center": tech_center,
-                "status": "success", 
+                "status": "success",
+                "input_incident_count": len(new_incidents),
                 "processed_count": len(processed_data),
-                "runtime_seconds": runtime
+                "failed_count": len(processing_stats.get("failed_incidents", [])),
+                "failed_incidents": processing_stats.get("failed_incidents", []),
+                "success_rate": processing_stats.get("summarization_stats", {}).get("success_rate", 0),
+                "runtime_seconds": runtime,
+                "processing_details": processing_stats
             }
+            
+            if processing_stats.get("failed_incidents"):
+                logging.warning(f"Preprocessing completed for {tech_center} with {len(processing_stats['failed_incidents'])} failed incidents")
+            else:
+                logging.info(f"Preprocessing completed successfully for {tech_center}")
+            
+            return result
             
         except Exception as e:
             logging.error(f"Preprocessing failed for {tech_center}: {e}")
@@ -197,10 +268,10 @@ class PreprocessingPipeline:
                 "tech_center": tech_center,
                 "status": "failed",
                 "error": str(e),
+                "failed_incidents": [],
                 "runtime_seconds": time.time() - start_time
             }
-    
-    def run_preprocessing_all_tech_centers(self) -> Dict:
+      def run_preprocessing_all_tech_centers(self) -> Dict:
         """Run preprocessing for all tech centers"""
         
         start_time = time.time()
@@ -208,11 +279,13 @@ class PreprocessingPipeline:
         
         results = []
         total_processed = 0
+        total_failed_incidents = []
         
         for tech_center in self.config.pipeline.tech_centers:
             result = self.run_preprocessing_for_tech_center(tech_center)
             results.append(result)
             total_processed += result.get("processed_count", 0)
+            total_failed_incidents.extend(result.get("failed_incidents", []))
         
         # Summary
         successful = len([r for r in results if r["status"] == "success"])
@@ -224,11 +297,20 @@ class PreprocessingPipeline:
             "successful": successful,
             "failed": failed,
             "total_processed": total_processed,
+            "total_failed_incidents": len(total_failed_incidents),
+            "failed_incident_numbers": sorted(total_failed_incidents),
             "runtime_seconds": time.time() - start_time,
             "results": results
         }
         
-        logging.info(f"Preprocessing completed: {successful} successful, {failed} failed, {total_processed} total processed")
+        # Enhanced logging with failed incidents summary
+        if total_failed_incidents:
+            logging.warning(f"Preprocessing completed: {successful} successful, {failed} failed tech centers")
+            logging.warning(f"Total incidents processed: {total_processed}")
+            logging.warning(f"Total failed incidents: {len(total_failed_incidents)}")
+            logging.warning(f"Failed incident numbers: {sorted(total_failed_incidents)}")
+        else:
+            logging.info(f"Preprocessing completed successfully: {successful} successful, {failed} failed, {total_processed} total processed")
         
         # Save results to blob storage for monitoring
         if self.config.pipeline.save_to_local:

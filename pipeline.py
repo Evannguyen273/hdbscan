@@ -54,354 +54,252 @@ class ClusteringPipeline:
         
         # Check for precomputed summaries
         if not summary_path:
-            default_summary_path = f"{intermediate_dir}/df_with_summaries.parquet"
-            if os.path.exists(default_summary_path):
-                logging.info(f"Found precomputed summaries at {default_summary_path}")
-                summary_path = default_summary_path
-        
-        # Load data from BigQuery
-        logging.info(f"Loading data with query: {input_query}")
-        df = self.bigquery_client.run_query(input_query)
-        logging.info(f"Loaded {len(df)} records")
-        
-        # Save raw data
-        df.to_parquet(f"{output_dir}/raw_data.parquet", index=False)
-        
-        # Generate summaries if not using precomputed ones
-        if summary_path and os.path.exists(summary_path):
-            logging.info(f"Loading precomputed summaries from {summary_path}")
-            summary_df = pd.read_parquet(summary_path)
-            df['combined_incidents_summary'] = summary_df['combined_incidents_summary']
-            fallback_stats = {"precomputed": True, "loaded_from": summary_path}
+            # Load data from BigQuery
+            logging.info(f"Loading data with query: {input_query}")
+            df = self.bigquery_client.run_query(input_query)
+            logging.info(f"Loaded {len(df)} records")
+            
+            # Save raw data
+            df.to_parquet(f"{output_dir}/raw_data.parquet", index=False)
+            
+            # Generate summaries
+            logging.info("Generating text summaries...")
+            df_with_summaries = self.text_processor.process_dataframe(df)
+            
+            # Save intermediate summaries
+            df_with_summaries.to_parquet(f"{intermediate_dir}/df_with_summaries.parquet", index=False)
         else:
-            logging.info("Processing text for embedding...")
-            combined_summaries, fallback_stats = self.text_processor.process_incident_for_embedding_batch(
-                df, batch_size=10
-            )
-            df['combined_incidents_summary'] = combined_summaries
-            
-            # Save intermediate dataframe
-            summary_save_path = f"{intermediate_dir}/df_with_summaries.parquet"
-            logging.info(f"Saving intermediate dataframe with summaries to {summary_save_path}")
-            summary_df = df[['number', 'combined_incidents_summary']].copy()
-            summary_df.to_parquet(summary_save_path, index=False)
+            # Load precomputed summaries
+            logging.info(f"Loading precomputed summaries from {summary_path}")
+            df_with_summaries = pd.read_parquet(summary_path)
         
-        # Generate hybrid embeddings
-        df_with_embeddings, classification_result, embedding_fallback_stats = self.embedding_generator.create_hybrid_embeddings(
-            df, text_column='combined_incidents_summary'
-        )
+        # Generate embeddings
+        logging.info("Generating embeddings...")
+        df_with_embeddings = self.embedding_generator.generate_embeddings(df_with_summaries)
         
-        # Merge fallback stats
-        if "precomputed" not in fallback_stats:
-            fallback_stats.update(embedding_fallback_stats)
-          # Save embeddings locally if enabled
-        if self.config.pipeline.save_to_local:
-            df_with_embeddings.to_parquet(f"{output_dir}/df_with_embeddings.parquet", index=False)
-            
-            with open(f"{output_dir}/classification_result.json", "w") as f:
-                json.dump(classification_result, f, indent=2)
-            
-            with open(f"{output_dir}/fallback_stats.json", "w") as f:
-                json.dump(fallback_stats, f, indent=2)
+        # Save results
+        df_with_embeddings.to_parquet(f"{output_dir}/df_with_embeddings.parquet", index=False)
         
-        # Save to BigQuery if specified
-        if embeddings_table_id:
-            success = self.bigquery_client.save_dataframe(
-                df_with_embeddings, embeddings_table_id, write_disposition
-            )
-            if success:
-                logging.info(f"Successfully saved embeddings to {embeddings_table_id}")
-        
-        # Save metadata
-        total_time = time.time() - start_time
-        metadata = {
-            "start_time": datetime.now().isoformat(),
-            "record_count": len(df),
-            "dataset_name": dataset_name,
-            "using_precomputed_summaries": summary_path is not None,
-            "runtime_seconds": total_time
+        # Calculate embedding metadata
+        embedding_metadata = {
+            "total_records": len(df_with_embeddings),
+            "embedding_dimension": len(df_with_embeddings['embedding'].iloc[0]) if len(df_with_embeddings) > 0 else 0,
+            "generation_time": time.time() - start_time,
+            "timestamp": datetime.now().isoformat(),
+            "weights": {
+                "entity": self.config.clustering.embedding.weights.entity,
+                "action": self.config.clustering.embedding.weights.action,
+                "semantic": self.config.clustering.embedding.weights.semantic
+            }
         }
         
-        with open(f"{output_dir}/embedding_metadata.json", "w") as f:
-            json.dump(metadata, f, indent=2)
+        # Save metadata
+        with open(f"{output_dir}/embedding_metadata.json", 'w') as f:
+            json.dump(embedding_metadata, f, indent=2)
         
-        logging.info(f"Embeddings generation completed in {total_time:.2f} seconds")
-        return df_with_embeddings, classification_result, fallback_stats
+        # Upload to BigQuery if specified
+        if embeddings_table_id:
+            logging.info(f"Uploading embeddings to BigQuery table: {embeddings_table_id}")
+            self.bigquery_client.upload_dataframe(
+                df_with_embeddings, 
+                embeddings_table_id, 
+                write_disposition=write_disposition
+            )
+        
+        stage_1_results = {
+            "dataframe": df_with_embeddings,
+            "metadata": embedding_metadata,
+            "output_dir": output_dir
+        }
+        
+        logging.info(f"Stage 1 completed in {embedding_metadata['generation_time']:.2f} seconds")
+        return df_with_embeddings, embedding_metadata, stage_1_results
     
-    def stage_2_train_hdbscan(
+    def stage_2_train_clustering(
         self,
-        df_with_embeddings: Optional[pd.DataFrame] = None,
-        dataset_name: str = "",
-        embedding_path: Optional[str] = None,
-        use_checkpoint: bool = True
-    ) -> Tuple[pd.DataFrame, np.ndarray, Any, Any]:
-        """Stage 2: Train HDBSCAN clustering model"""
+        df_with_embeddings: pd.DataFrame,
+        dataset_name: str
+    ) -> Tuple[pd.DataFrame, Dict, Dict]:
+        """Stage 2: Train UMAP + HDBSCAN clustering"""
         
-        logging.info("=== STAGE 2: TRAINING HDBSCAN ===")
-          # Load embeddings if not provided
-        if df_with_embeddings is None:
-            if embedding_path:
-                if not os.path.exists(embedding_path):
-                    raise FileNotFoundError(f"Embeddings file not found at {embedding_path}")
-                logging.info(f"Loading embeddings from custom path: {embedding_path}")
-                df_with_embeddings = pd.read_parquet(embedding_path)
-            elif dataset_name:
-                default_path = f"{self.config.pipeline.result_path}/{dataset_name}/embeddings/df_with_embeddings.parquet"
-                if not os.path.exists(default_path):
-                    raise FileNotFoundError(f"Embeddings file not found at {default_path}")
-                logging.info(f"Loading embeddings from default path: {default_path}")
-                df_with_embeddings = pd.read_parquet(default_path)
-            else:
-                raise ValueError("Either df_with_embeddings, dataset_name, or embedding_path must be provided")
+        start_time = time.time()
+        logging.info("=== STAGE 2: TRAINING CLUSTERING ===")
         
-        # Train HDBSCAN
-        clustered_df, umap_embeddings, clusterer, reducer = self.clusterer.train_hdbscan(
-            df_with_embeddings=df_with_embeddings,
-            dataset_name=dataset_name,
-            result_path=self.config.pipeline.result_path,
-            use_checkpoint=use_checkpoint
-        )
+        # Create output directory
+        output_dir = f"{self.config.pipeline.result_path}/{dataset_name}/clustering"
+        os.makedirs(output_dir, exist_ok=True)
         
-        return clustered_df, umap_embeddings, clusterer, reducer
+        # Train clustering
+        clustered_df = self.clusterer.fit_predict(df_with_embeddings)
+        
+        # Save clustering results
+        clustered_df.to_parquet(f"{output_dir}/clustered_df.parquet", index=False)
+        
+        # Save clustering artifacts
+        self.clusterer.save_artifacts(output_dir)
+        
+        # Calculate clustering metadata
+        clustering_metadata = {
+            "total_records": len(clustered_df),
+            "n_clusters": clustered_df['cluster'].nunique() - (1 if -1 in clustered_df['cluster'].values else 0),
+            "n_noise": (clustered_df['cluster'] == -1).sum(),
+            "training_time": time.time() - start_time,
+            "timestamp": datetime.now().isoformat(),
+            "parameters": {
+                "min_cluster_size": self.config.clustering.hdbscan.min_cluster_size,
+                "min_samples": self.config.clustering.hdbscan.min_samples,
+                "umap_n_components": self.config.clustering.umap.n_components,
+                "umap_n_neighbors": self.config.clustering.umap.n_neighbors
+            }
+        }
+        
+        # Save metadata
+        with open(f"{output_dir}/clustering_metadata.json", 'w') as f:
+            json.dump(clustering_metadata, f, indent=2)
+        
+        stage_2_results = {
+            "dataframe": clustered_df,
+            "metadata": clustering_metadata,
+            "output_dir": output_dir
+        }
+        
+        logging.info(f"Stage 2 completed in {clustering_metadata['training_time']:.2f} seconds")
+        logging.info(f"Found {clustering_metadata['n_clusters']} clusters with {clustering_metadata['n_noise']} noise points")
+        
+        return clustered_df, clustering_metadata, stage_2_results
     
     def stage_3_analyze_clusters(
         self,
-        clustered_df: Optional[pd.DataFrame] = None,
-        dataset_name: str = "",
-        umap_embeddings: Optional[np.ndarray] = None,
-        cluster_labels: Optional[np.ndarray] = None
-    ) -> Tuple[pd.DataFrame, Dict, Dict, Dict]:
-        """Stage 3: Generate cluster info, label clusters and group into domains"""
+        clustered_df: pd.DataFrame,
+        dataset_name: str
+    ) -> Tuple[pd.DataFrame, Dict, Dict]:
+        """Stage 3: Analyze clusters and generate labels"""
         
         start_time = time.time()
         logging.info("=== STAGE 3: ANALYZING CLUSTERS ===")
-          # Load clustered data if not provided
-        if clustered_df is None:
-            if not dataset_name:
-                raise ValueError("Either clustered_df or dataset_name must be provided")
-            
-            cluster_path = f"{self.config.pipeline.result_path}/{dataset_name}/clustering/clustered_df.parquet"
-            if not os.path.exists(cluster_path):
-                raise FileNotFoundError(f"Clustered data not found at {cluster_path}")
-            
-            logging.info(f"Loading clustered data from {cluster_path}")
-            essential_cols = ['number', 'short_description', 'cluster', 'cluster_probability', 'embedding']
-            clustered_df = read_parquet_optimized(cluster_path, columns=essential_cols)
         
         # Create output directory
         output_dir = f"{self.config.pipeline.result_path}/{dataset_name}/analysis"
         os.makedirs(output_dir, exist_ok=True)
         
-        # Generate cluster information
-        clusters_info = self.cluster_analyzer.generate_cluster_info(
-            clustered_df,
-            text_column='short_description',
-            cluster_column='cluster',
-            sample_size=5,
-            output_dir=output_dir
-        )
+        # Analyze clusters
+        cluster_details = self.cluster_analyzer.analyze_clusters(clustered_df)
         
-        # Label clusters using LLM
-        try:
-            labeled_clusters = self.cluster_labeler.label_clusters_with_llm(
-                clusters_info,
-                max_samples=300,
-                chunk_size=25,
-                output_dir=output_dir
-            )
-        except Exception as e:
-            logging.error(f"Error in cluster labeling: {e}")
-            # Create fallback labels
-            labeled_clusters = {
-                str(cid): {"topic": f"Cluster {cid}", "description": "Auto-generated label"}
-                for cid in clustered_df['cluster'].unique() if cid != -1
-            }
-            labeled_clusters["-1"] = {"topic": "Noise", "description": "Unclustered data points"}
-            
-            with open(f"{output_dir}/labeled_clusters_fallback.json", "w") as f:
-                json.dump(labeled_clusters, f, indent=2)
+        # Generate cluster labels
+        labeled_clusters = self.cluster_labeler.label_clusters(clustered_df, cluster_details)
         
-        # Group clusters into domains
-        try:            # Load UMAP embeddings if not provided
-            if umap_embeddings is None:
-                umap_embeddings_path = f"{self.config.pipeline.result_path}/{dataset_name}/clustering/umap_embeddings.npy"
-                umap_embeddings = np.load(umap_embeddings_path)
-            
-            if cluster_labels is None:
-                cluster_labels = clustered_df['cluster'].values
-            
-            domains = self.domain_grouper.group_clusters_into_domains(
-                labeled_clusters,
-                clusters_info,
-                umap_embeddings,
-                cluster_labels,
-                output_dir=output_dir
-            )
-        except Exception as e:
-            logging.error(f"Error in domain grouping: {e}")
-            # Create fallback domains
-            domains = {
-                "domains": [
-                    {"domain_name": "Other", "clusters": list(map(int, clusters_info.keys()))},
-                    {"domain_name": "Noise", "description": "Uncategorized incidents", "clusters": [-1]}
-                ]
-            }
-            
-            with open(f"{output_dir}/domains_fallback.json", "w") as f:
-                json.dump(domains, f, indent=2)
+        # Group into domains
+        domains = self.domain_grouper.group_clusters(labeled_clusters)
         
-        # Apply labels to data
-        final_df = self.cluster_analyzer.apply_labels_to_data(clustered_df, labeled_clusters, domains)
+        # Apply labels to dataframe
+        final_df = clustered_df.copy()
         
-        # Save final dataframe
-        if len(final_df) > 100000:
-            # Save in chunks for large datasets
-            chunk_size = 50000
-            for i in range(0, len(final_df), chunk_size):
-                chunk = final_df.iloc[i:i+chunk_size]
-                if i == 0:
-                    chunk.to_parquet(f"{output_dir}/final_df.parquet", index=False)
-                else:
-                    chunk.to_parquet(f"{output_dir}/final_df_part_{i//chunk_size}.parquet", index=False)
-            
-            # Save manifest
-            with open(f"{output_dir}/final_df_manifest.json", "w") as f:
-                json.dump({
-                    "num_parts": (len(final_df) + chunk_size - 1) // chunk_size,
-                    "total_rows": len(final_df),
-                    "parts": [f"final_df.parquet"] +
-                            [f"final_df_part_{j}.parquet" for j in range(1, (len(final_df) + chunk_size - 1) // chunk_size)]
-                }, f, indent=2)
-        else:
-            final_df.to_parquet(f"{output_dir}/final_df.parquet", index=False)
+        # Add cluster topics
+        cluster_topic_map = {cluster['cluster_id']: cluster['topic'] for cluster in labeled_clusters}
+        final_df['cluster_topic'] = final_df['cluster'].map(cluster_topic_map).fillna('Unknown')
+        
+        # Add domain information
+        cluster_domain_map = {}
+        for domain_name, domain_info in domains.items():
+            for cluster_id in domain_info['clusters']:
+                cluster_domain_map[cluster_id] = domain_name
+        final_df['domain_name'] = final_df['cluster'].map(cluster_domain_map).fillna('Uncategorized')
+        
+        # Save results
+        final_df.to_parquet(f"{output_dir}/final_df.parquet", index=False)
+        
+        # Save analysis artifacts
+        with open(f"{output_dir}/cluster_details.json", 'w') as f:
+            json.dump(cluster_details, f, indent=2)
+        
+        with open(f"{output_dir}/labeled_clusters.json", 'w') as f:
+            json.dump(labeled_clusters, f, indent=2)
+        
+        with open(f"{output_dir}/domains.json", 'w') as f:
+            json.dump(domains, f, indent=2)
+        
+        # Calculate analysis metadata
+        analysis_metadata = {
+            "total_records": len(final_df),
+            "labeled_clusters": len(labeled_clusters),
+            "domains": len(domains),
+            "analysis_time": time.time() - start_time,
+            "timestamp": datetime.now().isoformat()
+        }
         
         # Save metadata
-        total_time = time.time() - start_time
-        with open(f"{output_dir}/analysis_metadata.json", "w") as f:
-            metadata = {
-                "timestamp": datetime.now().isoformat(),
-                "parameters": {
-                    "max_domains": self.config.clustering.max_domains
-                },
-                "results": {
-                    "num_clusters": len([k for k in clusters_info.keys() if k != "-1"]),
-                    "num_domains": len(domains.get("domains", [])),
-                    "noise_percentage": clusters_info.get("-1", {}).get("percentage", 0) if "-1" in clusters_info else 0
-                },
-                "runtime_seconds": total_time,
-                "dataset_name": dataset_name
-            }
-            json.dump(metadata, f, indent=2)
+        with open(f"{output_dir}/analysis_metadata.json", 'w') as f:
+            json.dump(analysis_metadata, f, indent=2)
         
-        logging.info(f"Cluster analysis completed in {total_time:.2f} seconds")
-        return final_df, clusters_info, labeled_clusters, domains
+        stage_3_results = {
+            "dataframe": final_df,
+            "metadata": analysis_metadata,
+            "cluster_details": cluster_details,
+            "labeled_clusters": labeled_clusters,
+            "domains": domains,
+            "output_dir": output_dir
+        }
+        
+        logging.info(f"Stage 3 completed in {analysis_metadata['analysis_time']:.2f} seconds")
+        logging.info(f"Generated {len(labeled_clusters)} cluster labels in {len(domains)} domains")
+        
+        return final_df, analysis_metadata, stage_3_results
     
     def stage_4_save_results(
         self,
-        final_df: Optional[pd.DataFrame] = None,
-        dataset_name: str = "",
+        final_df: pd.DataFrame,
+        dataset_name: str,
         results_table_id: Optional[str] = None,
         write_disposition: str = "WRITE_APPEND"
-    ) -> bool:
-        """Stage 4: Save results to BigQuery"""
+    ) -> Dict:
+        """Stage 4: Save final results"""
         
         start_time = time.time()
         logging.info("=== STAGE 4: SAVING RESULTS ===")
-        
-        # Load final dataframe if not provided
-        if final_df is None:
-            if not dataset_name:
-                raise ValueError("Either final_df or dataset_name must be provided")
-              # Check for manifest file (multi-part dataset)
-            manifest_path = f"{self.config.pipeline.result_path}/{dataset_name}/analysis/final_df_manifest.json"
-            if os.path.exists(manifest_path):
-                logging.info("Found manifest file for multi-part dataset")
-                with open(manifest_path, "r") as f:
-                    manifest = json.load(f)
-                
-                # Load and combine all parts
-                all_parts = []
-                for part_file in manifest["parts"]:
-                    part_path = f"{self.config.pipeline.result_path}/{dataset_name}/analysis/{part_file}"
-                    try:
-                        df_part = read_parquet_optimized(part_path)
-                        all_parts.append(df_part)
-                    except Exception as e:
-                        logging.error(f"Error loading part {part_file}: {e}")
-                  if all_parts:
-                    final_df = pd.concat(all_parts, ignore_index=True)
-                    logging.info(f"Combined {len(all_parts)} parts into dataframe with {len(final_df)} rows")
-                else:
-                    raise ValueError("Could not load any parts of the final dataframe")
-            else:
-                # Regular single file
-                final_path = f"{self.config.pipeline.result_path}/{dataset_name}/analysis/final_df.parquet"
-                if not os.path.exists(final_path):
-                    raise FileNotFoundError(f"Final data not found at {final_path}")
-                
-                logging.info(f"Loading final data from {final_path}")
-                final_df = read_parquet_optimized(final_path)
         
         # Create output directory
         output_dir = f"{self.config.pipeline.result_path}/{dataset_name}/final"
         os.makedirs(output_dir, exist_ok=True)
         
-        success = False
+        # Save to CSV for easy viewing
+        results_csv_path = f"{output_dir}/results.csv"
+        final_df.to_csv(results_csv_path, index=False)
+        logging.info(f"Results saved to {results_csv_path}")
         
-        # Save to BigQuery if table_id provided
+        # Upload to BigQuery if specified
         if results_table_id:
-            try:
-                if len(final_df) > 100000:
-                    # Save in chunks for large datasets
-                    chunk_size = 50000
-                    logging.info(f"Saving {len(final_df)} rows to BigQuery in chunks of {chunk_size}")
-                    
-                    for i in range(0, len(final_df), chunk_size):
-                        chunk_df = final_df.iloc[i:i+chunk_size]
-                        chunk_write_disposition = write_disposition
-                        if i > 0 and write_disposition == "WRITE_TRUNCATE":
-                            chunk_write_disposition = "WRITE_APPEND"
-                        
-                        logging.info(f"Saving chunk {i//chunk_size + 1} with {len(chunk_df)} rows")
-                        self.bigquery_client.save_results_to_bigquery(
-                            chunk_df, results_table_id, chunk_write_disposition
-                        )
-                else:
-                    self.bigquery_client.save_results_to_bigquery(
-                        final_df, results_table_id, write_disposition
-                    )
-                
-                logging.info(f"Successfully saved results to BigQuery table {results_table_id}")
-                success = True
-            except Exception as e:
-                logging.error(f"Error saving to BigQuery: {e}")
-                success = False
-        else:
-            logging.info("No BigQuery table provided, skipping BigQuery save")
+            logging.info(f"Uploading results to BigQuery table: {results_table_id}")
+            self.bigquery_client.upload_dataframe(
+                final_df,
+                results_table_id,
+                write_disposition=write_disposition
+            )
         
-        # Save final CSV locally
-        if len(final_df) > 100000:
-            chunk_size = 50000
-            for i in range(0, len(final_df), chunk_size):
-                chunk_df = final_df.iloc[i:i+chunk_size]
-                if i == 0:
-                    chunk_df.to_csv(f"{output_dir}/results.csv", index=False)
-                else:
-                    chunk_df.to_csv(f"{output_dir}/results_part_{i//chunk_size}.csv", index=False)
-        else:
-            final_df.to_csv(f"{output_dir}/results.csv", index=False)
+        # Upload to blob storage if configured
+        if self.config.azure.blob_connection_string:
+            blob_path = f"{dataset_name}/final/results.parquet"
+            final_df.to_parquet("temp_results.parquet", index=False)
+            success = self.blob_storage.upload_file("temp_results.parquet", blob_path)
+            if success:
+                logging.info(f"Results uploaded to blob storage: {blob_path}")
+            os.remove("temp_results.parquet")
         
-        total_time = time.time() - start_time
-        logging.info(f"Results saving completed in {total_time:.2f} seconds")
+        stage_4_results = {
+            "csv_path": results_csv_path,
+            "total_records": len(final_df),
+            "save_time": time.time() - start_time,
+            "timestamp": datetime.now().isoformat()
+        }
         
-        return success
+        logging.info(f"Stage 4 completed in {stage_4_results['save_time']:.2f} seconds")
+        return stage_4_results
     
     def run_modular_pipeline(
         self,
         input_query: str,
-        embeddings_table_id: Optional[str],
-        results_table_id: Optional[str],
-        dataset_name: str,
+        embeddings_table_id: Optional[str] = None,
+        results_table_id: Optional[str] = None,
+        dataset_name: str = "default",
         embedding_path: Optional[str] = None,
         summary_path: Optional[str] = None,
         write_disposition: str = "WRITE_APPEND",
@@ -409,110 +307,107 @@ class ClusteringPipeline:
         end_at_stage: int = 4,
         use_checkpoint: bool = True
     ) -> Dict:
-        """Run the complete modular clustering pipeline"""
+        """Run the complete modular pipeline with checkpointing"""
         
-        # Validate stages
-        if not 1 <= start_from_stage <= 4:
-            raise ValueError("start_from_stage must be between 1 and 4")
-        if not 1 <= end_at_stage <= 4:
-            raise ValueError("end_at_stage must be between 1 and 4")
-        if start_from_stage > end_at_stage:
-            raise ValueError("start_from_stage cannot be greater than end_at_stage")
+        pipeline_start = time.time()
+        logging.info(f"Starting modular pipeline for dataset: {dataset_name}")
+        logging.info(f"Stages: {start_from_stage} to {end_at_stage}")
         
-        start_time = time.time()
-        logging.info(f"Starting modular pipeline for dataset '{dataset_name}' (stages {start_from_stage}-{end_at_stage})")
+        # Initialize run metadata
+        run_metadata = {
+            "dataset_name": dataset_name,
+            "start_stage": start_from_stage,
+            "end_stage": end_at_stage,
+            "start_time": datetime.now().isoformat(),
+            "stages": {}
+        }
         
-        results = {}
+        # Stage variables
+        df_with_embeddings = None
+        clustered_df = None
+        final_df = None
         
-        # Stage 1: Generate embeddings
-        if start_from_stage <= 1 <= end_at_stage:
-            df_with_embeddings, classification_result, fallback_stats = self.stage_1_generate_embeddings(
-                input_query=input_query,
-                dataset_name=dataset_name,
-                embeddings_table_id=embeddings_table_id,
-                summary_path=summary_path,
-                write_disposition=write_disposition
-            )
-            results["embeddings"] = {
-                "df_with_embeddings": df_with_embeddings,
-                "classification_result": classification_result,
-                "fallback_stats": fallback_stats
-            }
-        
-        # Stage 2: Train HDBSCAN
-        if start_from_stage <= 2 <= end_at_stage:
-            df_input = results.get("embeddings", {}).get("df_with_embeddings", None)
+        try:
+            # Stage 1: Generate embeddings
+            if start_from_stage <= 1 <= end_at_stage:
+                if use_checkpoint and embedding_path and os.path.exists(embedding_path):
+                    logging.info(f"Loading embeddings from checkpoint: {embedding_path}")
+                    df_with_embeddings = read_parquet_optimized(embedding_path)
+                    stage_1_metadata = {"loaded_from_checkpoint": True}
+                else:
+                    df_with_embeddings, stage_1_metadata, stage_1_results = self.stage_1_generate_embeddings(
+                        input_query, dataset_name, embeddings_table_id, summary_path, write_disposition
+                    )
+                
+                run_metadata["stages"]["stage_1"] = stage_1_metadata
             
-            clustered_df, umap_embeddings, clusterer, reducer = self.stage_2_train_hdbscan(
-                df_with_embeddings=df_input,
-                dataset_name=dataset_name,
-                embedding_path=embedding_path,
-                use_checkpoint=use_checkpoint
-            )
-            results["clustering"] = {
-                "clustered_df": clustered_df,
-                "umap_embeddings": umap_embeddings,
-                "clusterer": clusterer,
-                "reducer": reducer
-            }
-        
-        # Stage 3: Analyze clusters
-        if start_from_stage <= 3 <= end_at_stage:
-            df_input = results.get("clustering", {}).get("clustered_df", None)
-            umap_input = results.get("clustering", {}).get("umap_embeddings", None)
-            cluster_labels_input = None
-            if df_input is not None:
-                cluster_labels_input = df_input['cluster'].values
+            # Stage 2: Train clustering
+            if start_from_stage <= 2 <= end_at_stage:
+                if df_with_embeddings is None:
+                    # Load from checkpoint
+                    checkpoint_path = f"{self.config.pipeline.result_path}/{dataset_name}/embeddings/df_with_embeddings.parquet"
+                    if os.path.exists(checkpoint_path):
+                        logging.info(f"Loading embeddings from checkpoint: {checkpoint_path}")
+                        df_with_embeddings = read_parquet_optimized(checkpoint_path)
+                    else:
+                        raise ValueError("No embeddings available. Run stage 1 first.")
+                
+                clustered_df, stage_2_metadata, stage_2_results = self.stage_2_train_clustering(
+                    df_with_embeddings, dataset_name
+                )
+                run_metadata["stages"]["stage_2"] = stage_2_metadata
             
-            final_df, clusters_info, labeled_clusters, domains = self.stage_3_analyze_clusters(
-                clustered_df=df_input,
-                dataset_name=dataset_name,
-                umap_embeddings=umap_input,
-                cluster_labels=cluster_labels_input
-            )
-            results["analysis"] = {
-                "final_df": final_df,
-                "clusters_info": clusters_info,
-                "labeled_clusters": labeled_clusters,
-                "domains": domains
-            }
-        
-        # Stage 4: Save results
-        if start_from_stage <= 4 <= end_at_stage:
-            df_input = results.get("analysis", {}).get("final_df", None)
+            # Stage 3: Analyze clusters
+            if start_from_stage <= 3 <= end_at_stage:
+                if clustered_df is None:
+                    # Load from checkpoint
+                    checkpoint_path = f"{self.config.pipeline.result_path}/{dataset_name}/clustering/clustered_df.parquet"
+                    if os.path.exists(checkpoint_path):
+                        logging.info(f"Loading clustered data from checkpoint: {checkpoint_path}")
+                        clustered_df = read_parquet_optimized(checkpoint_path)
+                    else:
+                        raise ValueError("No clustered data available. Run stage 2 first.")
+                
+                final_df, stage_3_metadata, stage_3_results = self.stage_3_analyze_clusters(
+                    clustered_df, dataset_name
+                )
+                run_metadata["stages"]["stage_3"] = stage_3_metadata
             
-            success = self.stage_4_save_results(
-                final_df=df_input,
-                dataset_name=dataset_name,
-                results_table_id=results_table_id,
-                write_disposition=write_disposition
-            )
-            results["saved"] = success
+            # Stage 4: Save results
+            if start_from_stage <= 4 <= end_at_stage:
+                if final_df is None:
+                    # Load from checkpoint
+                    checkpoint_path = f"{self.config.pipeline.result_path}/{dataset_name}/analysis/final_df.parquet"
+                    if os.path.exists(checkpoint_path):
+                        logging.info(f"Loading final data from checkpoint: {checkpoint_path}")
+                        final_df = read_parquet_optimized(checkpoint_path)
+                    else:
+                        raise ValueError("No final data available. Run stage 3 first.")
+                
+                stage_4_results = self.stage_4_save_results(
+                    final_df, dataset_name, results_table_id, write_disposition
+                )
+                run_metadata["stages"]["stage_4"] = stage_4_results
+            
+            # Complete run metadata
+            run_metadata["end_time"] = datetime.now().isoformat()
+            run_metadata["total_time"] = time.time() - pipeline_start
+            run_metadata["status"] = "completed"
+            
+            # Save run metadata
+            metadata_dir = f"{self.config.pipeline.result_path}/{dataset_name}"
+            os.makedirs(metadata_dir, exist_ok=True)
+            with open(f"{metadata_dir}/run_metadata.json", 'w') as f:
+                json.dump(run_metadata, f, indent=2)
+            
+            logging.info(f"Pipeline completed successfully in {run_metadata['total_time']:.2f} seconds")
+            return run_metadata
         
-        # Calculate total runtime and save metadata
-        total_time = time.time() - start_time
-        logging.info(f"Modular pipeline completed in {total_time:.2f} seconds")
-          # Save consolidated metadata
-        output_dir = f"{self.config.pipeline.result_path}/{dataset_name}"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        with open(f"{output_dir}/run_metadata.json", "w") as f:
-            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-            metadata = {
-                "run_id": run_id,
-                "timestamp": datetime.now().isoformat(),
-                "dataset_name": dataset_name,
-                "stages_run": list(range(start_from_stage, end_at_stage + 1)),
-                "parameters": {
-                    "min_cluster_size": self.config.clustering.min_cluster_size,
-                    "min_samples": self.config.clustering.min_samples,
-                    "umap_n_components": self.config.clustering.umap_n_components,
-                    "max_domains": self.config.clustering.max_domains,
-                    "write_disposition": write_disposition,
-                    "use_checkpoint": use_checkpoint
-                },
-                "runtime_seconds": total_time
-            }
-            json.dump(metadata, f, indent=2)
-        
-        return results
+        except Exception as e:
+            run_metadata["end_time"] = datetime.now().isoformat()
+            run_metadata["total_time"] = time.time() - pipeline_start
+            run_metadata["status"] = "failed"
+            run_metadata["error"] = str(e)
+            
+            logging.error(f"Pipeline failed: {e}")
+            raise e
