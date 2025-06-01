@@ -1,257 +1,240 @@
 import logging
+import time
+import json
+import requests
 import numpy as np
 import pandas as pd
+from typing import List, Optional, Dict, Any
 import openai
-import time
-import uuid
-import json
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.preprocessing import StandardScaler
-from tqdm import tqdm
-from typing import Tuple, Dict, Any
+from openai import AzureOpenAI
+import os
 
 class EmbeddingGenerator:
     def __init__(self, config):
         self.config = config
-        self.embedding_client = self._setup_embedding_client()
-    
-    def _setup_embedding_client(self):
-        """Setup Azure OpenAI embedding client"""
-        return openai.AzureOpenAI(
-            api_key=self.config.azure.openai_embedding_key,
-            api_version=self.config.azure.api_version,
-            azure_endpoint=self.config.azure.openai_embedding_endpoint
+        
+        # Get Azure OpenAI configuration
+        azure_config = config.get('azure', {})
+        openai_config = azure_config.get('openai', {})
+        
+        # Initialize Azure OpenAI client for embeddings
+        embedding_endpoint = openai_config.get('embedding_endpoint', '')
+        if '/openai/deployments' in embedding_endpoint:
+            base_endpoint = embedding_endpoint.split('/openai/deployments')[0]
+        else:
+            base_endpoint = embedding_endpoint
+            
+        self.embedding_client = AzureOpenAI(
+            api_key=openai_config.get('embedding_key', ''),
+            api_version=openai_config.get('embedding_api_version', ''),
+            azure_endpoint=base_endpoint
         )
+        
+        # Initialize Azure OpenAI client for chat (summaries)
+        self.chat_client = AzureOpenAI(
+            api_key=openai_config.get('api_key', ''),
+            api_version=openai_config.get('api_version', ''),
+            azure_endpoint=openai_config.get('endpoint', '')
+        )
+        
+        self.embedding_model = openai_config.get('embedding_model', 'text-embedding-3-large')
+        self.chat_deployment = openai_config.get('deployment_name', 'gpt-4o')
+        
+        # Embedding configuration - Pure semantic as requested
+        clustering_config = config.get('clustering', {})
+        self.embedding_weights = clustering_config.get('embedding', {}).get('weights', {
+            'semantic': 1.0, 'entity': 0.0, 'action': 0.0
+        })
+        self.batch_size = clustering_config.get('embedding', {}).get('batch_size', 25)
+        
+        logging.info(f"EmbeddingGenerator initialized with model: {self.embedding_model}")
+        logging.info(f"Embedding weights: {self.embedding_weights}")
     
-    def estimate_tokens(self, text: str) -> int:
-        """Estimate token count for a given text"""
-        if not text:
-            return 0
-        return len(text) // 4 + 1
-    
-    def classify_terms_with_llm(self, df: pd.DataFrame, text_column: str = 'combined_incidents_summary') -> Dict[str, Dict]:
-        """Use GPT to classify terms from incidents into entities and actions"""
-        # Combine all text for term extraction
-        sample_df = df.sample(min(1000, len(df))) if len(df) > 1000 else df
-        all_text = " ".join(sample_df[text_column].fillna('').astype(str).tolist())
+    def generate_incident_summary(self, short_description: str, description: str, max_retries: int = 3) -> str:
+        """Generate AI-powered incident summary using Azure OpenAI"""
+        
+        # Combine short description and full description
+        combined_text = f"Title: {short_description}\nDetails: {description}"
         
         prompt = f"""
-Analyze the following IT incidents text and identify:
-1. ENTITIES: Technical components, systems, software, or services mentioned (like SAP, Outlook, VPN)
-2. ACTIONS: Verbs describing what happened or needs to happen (like crashed, failed, reset)
+        Analyze this IT incident and create a concise, technical summary focusing on the core issue:
 
-Extract up to 50 most common entities and up to 50 most common actions.
+        {combined_text}
 
-YOU MUST RESPOND WITH VALID JSON using this structure:
-{{
-    "ENTITY": {{"term1": frequency, "term2": frequency, ...}},
-    "ACTION": {{"term1": frequency, "term2": frequency, ...}}
-}}
+        Instructions:
+        - Identify the main technical problem or issue
+        - Extract key technical components (systems, applications, errors)
+        - Remove unnecessary details and user-specific information
+        - Focus on the root cause or symptom
+        - Keep it under 100 words
+        - Use technical terminology where appropriate
 
-Incident text sample:
-{all_text[:3000]}
-"""
+        Summary:
+        """
         
-        correlation_id = str(uuid.uuid4())
-        retry_attempts = 3
-        
-        for attempt in range(retry_attempts):
+        for attempt in range(max_retries):
             try:
-                response = self.embedding_client.chat.completions.create(
-                    model=self.config.azure.chat_model,
+                response = self.chat_client.chat.completions.create(
+                    model=self.chat_deployment,
                     messages=[
-                        {"role": "system", "content": "You are an expert IT analyst that extracts and classifies terms from incident descriptions. Always return valid JSON."},
+                        {"role": "system", "content": "You are an IT incident analyst who creates concise technical summaries."},
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0.1,
-                    response_format={"type": "json_object"},
-                    timeout=30,
-                    user=correlation_id
+                    max_tokens=150
                 )
                 
-                result = json.loads(response.choices[0].message.content)
+                summary = response.choices[0].message.content.strip()
                 
-                # Validate expected structure
-                if "ENTITY" in result and "ACTION" in result:
-                    return result
-                else:
-                    raise ValueError("Response missing required ENTITY or ACTION keys")
-                    
+                # Clean up the summary
+                if summary.startswith("Summary:"):
+                    summary = summary[8:].strip()
+                
+                return summary
+                
             except Exception as e:
-                if attempt < retry_attempts - 1:
-                    wait_time = min(30, 2 ** attempt * 2)
-                    logging.warning(f"Term classification attempt {attempt+1} failed: {e}. Retrying in {wait_time}s")
-                    time.sleep(wait_time)
+                logging.warning(f"Summary generation attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
                 else:
-                    logging.error(f"All term classification attempts failed: {e}")
-                    return {"ENTITY": {}, "ACTION": {}}
+                    logging.error(f"Failed to generate summary after {max_retries} attempts")
+                    # Fallback to simple text processing
+                    return self._simple_summary_fallback(short_description, description)
     
-    def generate_semantic_embeddings(self, text_series: pd.Series, batch_size: int = 25) -> np.ndarray:
-        """Generate semantic embeddings using Azure OpenAI"""
-        semantic_embeddings = []
-        total_batches = (len(text_series) + batch_size - 1) // batch_size
-        retry_limit = 3
-        
-        # Azure-specific metrics tracking
-        azure_metrics = {
-            "total_requests": 0,
-            "successful_requests": 0,
-            "failed_requests": 0,
-            "rate_limited_requests": 0,
-            "total_time": 0
-        }
-        
-        # Reduce batch size for very large texts
-        max_estimated_tokens = text_series.apply(lambda x: self.estimate_tokens(str(x))).max()
-        if max_estimated_tokens > 4000:
-            adjusted_batch_size = max(1, min(batch_size, 5))
-            logging.warning(f"Detected large texts (est. {max_estimated_tokens} tokens). Reducing batch size to {adjusted_batch_size}")
-            batch_size = adjusted_batch_size
-        
-        # Process in batches
-        with tqdm(total=len(text_series), desc="Embedding texts") as pbar:
-            for i in range(0, len(text_series), batch_size):
-                batch = text_series.iloc[i:i+batch_size].fillna('').tolist()
-                batch_size_actual = len(batch)
-                correlation_id = str(uuid.uuid4())
-                
-                azure_metrics["total_requests"] += 1
-                start_time = time.time()
-                
-                try:
-                    response = self.embedding_client.embeddings.create(
-                        input=batch,
-                        model=self.config.azure.embedding_model,
-                        timeout=30,
-                        user=correlation_id
-                    )
-                    
-                    # Extract embeddings from response
-                    batch_embeddings = [item.embedding for item in response.data]
-                    semantic_embeddings.extend(batch_embeddings)
-                    
-                    # Update metrics
-                    azure_metrics["successful_requests"] += 1
-                    azure_metrics["total_time"] += time.time() - start_time
-                    
-                except Exception as e:
-                    error_msg = str(e).lower()
-                    
-                    # Handle rate limiting
-                    if "rate limit" in error_msg or "too many requests" in error_msg:
-                        azure_metrics["rate_limited_requests"] += 1
-                        wait_time = min(60, 2 ** (azure_metrics["rate_limited_requests"] % 6))
-                        logging.warning(f"Rate limit hit. Backing off for {wait_time}s")
-                        time.sleep(wait_time)
-                        continue
-                    
-                    # Handle token limit errors
-                    elif "token" in error_msg or "context length" in error_msg:
-                        if batch_size > 1:
-                            new_batch_size = max(1, batch_size // 2)
-                            logging.warning(f"Token limit exceeded. Reducing batch size to {new_batch_size}")
-                            batch_size = new_batch_size
-                            continue
-                        else:
-                            logging.error(f"Single item too long: {len(text_series.iloc[i])}")
-                            semantic_embeddings.extend([[0.0] * 3072])
-                    
-                    else:
-                        azure_metrics["failed_requests"] += 1
-                        logging.error(f"Embedding error: {error_msg}")
-                        semantic_embeddings.extend([[0.0] * 3072 for _ in range(batch_size_actual)])
-                
-                pbar.update(batch_size_actual)
-        
-        # Log metrics
-        avg_time = azure_metrics["total_time"] / max(1, azure_metrics["successful_requests"])
-        logging.info(f"Azure OpenAI Embedding API metrics: {azure_metrics['total_requests']} requests, "
-                    f"{azure_metrics['successful_requests']} successful, {azure_metrics['failed_requests']} failed, "
-                    f"{azure_metrics['rate_limited_requests']} rate limited, avg time: {avg_time:.2f}s")
-        
-        # Ensure we return the right number of embeddings
-        if len(semantic_embeddings) < len(text_series):
-            logging.warning(f"Missing embeddings: expected {len(text_series)}, got {len(semantic_embeddings)}. Padding with zeros.")
-            semantic_embeddings.extend([[0.0] * 3072 for _ in range(len(text_series) - len(semantic_embeddings))])
-        
-        return np.array(semantic_embeddings)
+    def _simple_summary_fallback(self, short_description: str, description: str) -> str:
+        """Simple fallback summary when AI generation fails"""
+        # Take first 150 characters of combined text
+        combined = f"{short_description}. {description}"
+        if len(combined) <= 150:
+            return combined
+        return combined[:147] + "..."
     
-    def create_hybrid_embeddings(self, df: pd.DataFrame, text_column: str = 'combined_incidents_summary') -> Tuple[pd.DataFrame, Dict, Dict]:
-        """Create hybrid embeddings combining entity, action, and semantic information"""
-        logging.info(f"Creating hybrid embeddings for {len(df)} records")
-        result_df = df.copy()
+    def generate_embedding(self, text: str, max_retries: int = 3) -> Optional[List[float]]:
+        """Generate embedding for a single text using Azure OpenAI"""
         
-        # Get entity and action classification
-        logging.info("Classifying terms into entities and actions...")
-        classification_result = self.classify_terms_with_llm(result_df, text_column)
+        for attempt in range(max_retries):
+            try:
+                response = self.embedding_client.embeddings.create(
+                    model=self.embedding_model,
+                    input=text
+                )
+                
+                embedding = response.data[0].embedding
+                
+                # Apply embedding weights (pure semantic as configured)
+                if self.embedding_weights['semantic'] != 1.0:
+                    # Scale embedding if semantic weight is not 1.0
+                    embedding = [x * self.embedding_weights['semantic'] for x in embedding]
+                
+                return embedding
+                
+            except Exception as e:
+                logging.warning(f"Embedding generation attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    logging.error(f"Failed to generate embedding after {max_retries} attempts")
+                    return None
+    
+    def generate_embeddings_batch(self, texts: List[str], show_progress: bool = True) -> List[Optional[List[float]]]:
+        """Generate embeddings for a batch of texts"""
+        embeddings = []
+        total_texts = len(texts)
         
-        # Extract entity and action terms
-        entity_terms = list(classification_result.get("ENTITY", {}).keys())
-        action_terms = list(classification_result.get("ACTION", {}).keys())
-        logging.info(f"Using {len(entity_terms)} entities and {len(action_terms)} action terms")
+        # Process in batches to avoid rate limits
+        for i in range(0, total_texts, self.batch_size):
+            batch = texts[i:i + self.batch_size]
+            batch_embeddings = []
+            
+            for j, text in enumerate(batch):
+                if show_progress and (i + j) % 10 == 0:
+                    logging.info(f"Processing embedding {i + j + 1}/{total_texts}")
+                
+                embedding = self.generate_embedding(text)
+                batch_embeddings.append(embedding)
+                
+                # Small delay to avoid rate limiting
+                time.sleep(0.1)
+            
+            embeddings.extend(batch_embeddings)
+            
+            # Longer delay between batches
+            if i + self.batch_size < total_texts:
+                time.sleep(1)
         
-        # Create vectorizers and generate entity/action embeddings
-        vectorizers = {
-            'entity': TfidfVectorizer(vocabulary=entity_terms, lowercase=True),
-            'action': TfidfVectorizer(vocabulary=action_terms, lowercase=True)
-        }
+        return embeddings
+    
+    def process_incidents_with_embeddings(self, incidents_df: pd.DataFrame) -> pd.DataFrame:
+        """Process incidents to generate summaries and embeddings"""
         
-        # Generate and transform embeddings
-        text_data = result_df[text_column].fillna('')
-        matrices = {
-            'entity': vectorizers['entity'].fit_transform(text_data),
-            'action': vectorizers['action'].fit_transform(text_data)
-        }
+        processed_incidents = incidents_df.copy()
         
-        # Convert sparse matrices to dense
-        dense_matrices = {k: m.toarray() for k, m in matrices.items()}
+        # Generate AI summaries
+        logging.info("Generating AI-powered incident summaries...")
+        summaries = []
         
-        # Generate semantic embeddings
+        for idx, row in incidents_df.iterrows():
+            if idx % 10 == 0:
+                logging.info(f"Processing summary {idx + 1}/{len(incidents_df)}")
+            
+            summary = self.generate_incident_summary(
+                row.get('short_description', ''),
+                row.get('description', '')
+            )
+            summaries.append(summary)
+            
+            # Small delay to avoid rate limiting
+            time.sleep(0.2)
+        
+        processed_incidents['combined_incidents_summary'] = summaries
+        
+        # Generate embeddings from summaries
         logging.info("Generating semantic embeddings...")
-        semantic_embeddings = self.generate_semantic_embeddings(
-            result_df[text_column],
-            batch_size=self.config.embedding.batch_size
-        )
+        embeddings = self.generate_embeddings_batch(summaries)
         
-        # Scale all embedding components
-        logging.info("Scaling and combining embeddings...")
-        scaled_matrices = {}
-        for name, matrix in {**dense_matrices, 'semantic': semantic_embeddings}.items():
-            scaler = StandardScaler()
-            scaled_matrices[name] = scaler.fit_transform(matrix)
+        # Filter out failed embeddings
+        valid_indices = [i for i, emb in enumerate(embeddings) if emb is not None]
         
-        # Set weights from config
-        weights = {
-            'entity': self.config.embedding.entity_weight,
-            'action': self.config.embedding.action_weight,
-            'semantic': self.config.embedding.semantic_weight
+        if len(valid_indices) < len(embeddings):
+            logging.warning(f"Failed to generate {len(embeddings) - len(valid_indices)} embeddings")
+            processed_incidents = processed_incidents.iloc[valid_indices].copy()
+            embeddings = [embeddings[i] for i in valid_indices]
+        
+        processed_incidents['embedding'] = embeddings
+        processed_incidents['processed_timestamp'] = pd.Timestamp.now()
+        
+        logging.info(f"Successfully processed {len(processed_incidents)} incidents with embeddings")
+        
+        return processed_incidents
+    
+    def validate_embeddings(self, embeddings: List[List[float]]) -> Dict[str, Any]:
+        """Validate embedding quality and return metrics"""
+        if not embeddings:
+            return {"valid": False, "error": "No embeddings provided"}
+        
+        # Convert to numpy array for analysis
+        embedding_matrix = np.array(embeddings)
+        
+        # Check for NaN or infinite values
+        has_nan = np.any(np.isnan(embedding_matrix))
+        has_inf = np.any(np.isinf(embedding_matrix))
+        
+        if has_nan or has_inf:
+            return {
+                "valid": False, 
+                "error": f"Invalid values detected - NaN: {has_nan}, Inf: {has_inf}"
+            }
+        
+        # Calculate basic statistics
+        dimensions = embedding_matrix.shape[1]
+        variance = np.var(embedding_matrix)
+        mean_norm = np.mean(np.linalg.norm(embedding_matrix, axis=1))
+        
+        return {
+            "valid": True,
+            "count": len(embeddings),
+            "dimensions": dimensions,
+            "variance": float(variance),
+            "mean_norm": float(mean_norm),
+            "embedding_weights_used": self.embedding_weights
         }
-        
-        # Get dimensions for each component
-        dims = {k: m.shape[1] for k, m in scaled_matrices.items()}
-        
-        # Create combined embeddings array
-        total_dims = sum(dims.values())
-        combined_embeddings = np.zeros((len(result_df), total_dims))
-        
-        # Fill combined embeddings with weighted components
-        start_idx = 0
-        for name, matrix in scaled_matrices.items():
-            end_idx = start_idx + dims[name]
-            combined_embeddings[:, start_idx:end_idx] = weights[name] * matrix
-            start_idx = end_idx
-        
-        # Convert embeddings to JSON strings
-        result_df['embedding'] = [json.dumps(emb.tolist()) for emb in combined_embeddings]
-        
-        logging.info("Hybrid embedding generation complete")
-        
-        # Create fallback stats structure for compatibility
-        fallback_stats = {
-            "embedding_generation": True,
-            "total_embeddings": len(result_df),
-            "entity_terms": len(entity_terms),
-            "action_terms": len(action_terms)
-        }
-        
-        return result_df, classification_result, fallback_stats

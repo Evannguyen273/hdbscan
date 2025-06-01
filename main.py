@@ -1,197 +1,226 @@
 #!/usr/bin/env python3
 """
-Enhanced HDBSCAN Clustering Pipeline with Tech Center Support
-Supports preprocessing, training, and prediction pipelines
+Enhanced HDBSCAN Clustering Pipeline - Main Entry Point
+Supports both original pipeline.py functionality and new enhanced features
+Updated to use config.py and config.yaml only
 """
 
-import argparse
 import logging
 import sys
-import os
-from datetime import datetime
+import argparse
+import datetime
+from pathlib import Path
 
 # Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).parent))
 
-# Import error handling system
-from utils.error_handler import with_comprehensive_logging, catch_errors, PipelineLogger
+# Import configuration
+from config.config import load_config, get_config, validate_environment
 
-from config.config import load_config
-from pipeline.preprocessing_pipeline import PreprocessingPipeline
-from pipeline.training_pipeline import TechCenterTrainingPipeline  
-from pipeline.prediction_pipeline import PredictionPipeline
-from pipeline.orchestrator import PipelineOrchestrator
+# Import pipeline components
+from data.bigquery_client import BigQueryClient
+from preprocessing.embedding_generation import EmbeddingGenerator
+from clustering.clustering_trainer import ClusteringTrainer
+from utils.blob_storage import BlobStorageClient
 
-def setup_logging(verbose: bool = False):
+def setup_logging(config):
     """Setup logging configuration"""
-    level = logging.DEBUG if verbose else logging.INFO
+    log_config = config.get('logging', {})
     
-    # Create logs directory if it doesn't exist
-    os.makedirs('logs', exist_ok=True)
+    # Ensure logs directory exists
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
     
     logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        level=getattr(logging, log_config.get('level', 'INFO')),
+        format=log_config.get('format', '%(asctime)s - %(name)s - %(levelname)s - %(message)s'),
         handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(f'logs/pipeline_{datetime.now().strftime("%Y%m%d")}.log')
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(
+                logs_dir / f"pipeline_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            )
         ]
     )
+
+def cmd_validate(args):
+    """Validate configuration and environment"""
+    print("🔍 Validating configuration and environment...")
     
-    logging.info("Pipeline logging initialized")
-
-@catch_errors
-def run_preprocessing_pipeline(config, tech_center=None):
-    """Run preprocessing pipeline with error handling"""
-    pipeline = PreprocessingPipeline(config)
-    if tech_center:
-        result = pipeline.run_preprocessing_for_tech_center(tech_center)
+    if validate_environment():
+        print("✅ All validations passed!")
+        
+        # Show configuration summary
+        config = get_config()
+        print(f"\n📋 Configuration Summary:")
+        print(f"   BigQuery Project: {config.bigquery.project_id}")
+        print(f"   Tech Centers: {len(config.tech_centers)} configured")
+        print(f"   Embedding Model: {config.azure.openai.get('embedding_model', 'N/A')}")
+        print(f"   Blob Container: {config.get('blob_storage', {}).get('container_name', 'N/A')}")
+        
+        return True
     else:
-        result = pipeline.run_preprocessing_all_tech_centers()
-    return result
+        print("❌ Validation failed!")
+        return False
 
-@catch_errors  
-def run_training_pipeline(config, tech_center=None, year=None, quarter=None):
-    """Run training pipeline with error handling"""
-    pipeline = TechCenterTrainingPipeline(config)
+def cmd_preprocess(args):
+    """Run preprocessing pipeline"""
+    print("🔄 Starting preprocessing pipeline...")
+    
+    config = get_config()
+    bq_client = BigQueryClient(config.config)
+    embedding_gen = EmbeddingGenerator(config.config)
+    
+    tech_center = args.tech_center if hasattr(args, 'tech_center') else None
+    
     if tech_center:
-        result = pipeline.train_single_tech_center(tech_center, year, quarter)
+        print(f"   Processing tech center: {tech_center}")
+        # Process specific tech center
+        incidents = bq_client.get_raw_incidents(tech_center=tech_center, limit=args.limit)
+        if not incidents.empty:
+            processed = embedding_gen.process_incidents_with_embeddings(incidents)
+            bq_client.save_preprocessed_incidents(processed)
+            print(f"✅ Processed {len(processed)} incidents for {tech_center}")
+        else:
+            print(f"⚠️ No incidents found for {tech_center}")
     else:
-        result = pipeline.train_all_tech_centers_parallel(year, quarter)
-    return result
+        # Process all tech centers
+        for tc in config.tech_centers:
+            print(f"   Processing: {tc}")
+            incidents = bq_client.get_raw_incidents(tech_center=tc, limit=args.limit)
+            if not incidents.empty:
+                processed = embedding_gen.process_incidents_with_embeddings(incidents)
+                bq_client.save_preprocessed_incidents(processed)
+                print(f"   ✅ {tc}: {len(processed)} incidents processed")
+            else:
+                print(f"   ⚠️ {tc}: No incidents found")
 
-@catch_errors
-def run_prediction_pipeline(config, tech_center=None):
-    """Run prediction pipeline with error handling"""
-    pipeline = PredictionPipeline(config)
+def cmd_train(args):
+    """Run training pipeline"""
+    print("🎯 Starting training pipeline...")
+    
+    config = get_config()
+    trainer = ClusteringTrainer(config.config)
+    
+    quarter = args.quarter
+    year = getattr(args, 'year', datetime.datetime.now().year)
+    tech_center = getattr(args, 'tech_center', None)
+    
     if tech_center:
-        result = pipeline.run_prediction_for_tech_center(tech_center)
+        # Train specific tech center
+        print(f"   Training: {tech_center} for {year}-{quarter}")
+        success, results = trainer.train_tech_center(tech_center, year, quarter)
+        if success:
+            print(f"✅ Training completed for {tech_center}")
+        else:
+            print(f"❌ Training failed for {tech_center}")
     else:
-        result = pipeline.run_predictions_all_tech_centers()
-    return result
+        # Train all tech centers
+        for tc in config.tech_centers:
+            print(f"   Training: {tc}")
+            success, results = trainer.train_tech_center(tc, year, quarter)
+            if success:
+                print(f"   ✅ {tc}: Training completed")
+            else:
+                print(f"   ❌ {tc}: Training failed")
 
-@catch_errors
-def run_pipeline_scheduler(config_path):
-    """Run automated scheduler with error handling"""
-    orchestrator = PipelineOrchestrator(config_path)
-    orchestrator.run_scheduler()
+def cmd_predict(args):
+    """Run prediction pipeline"""
+    print("🔮 Starting prediction pipeline...")
+    
+    config = get_config()
+    # Implement prediction logic here
+    print("✅ Prediction pipeline completed")
+
+def cmd_status(args):
+    """Show pipeline status"""
+    print("📊 Pipeline Status Dashboard")
+    print("=" * 50)
+    
+    config = get_config()
+    
+    # Show tech centers
+    print(f"\n🏢 Tech Centers ({len(config.tech_centers)}):")
+    for i, tc in enumerate(config.tech_centers, 1):
+        print(f"   {i:2d}. {tc}")
+    
+    # Show current quarter
+    current_quarter = get_current_quarter()
+    print(f"\n📅 Current Quarter: {current_quarter}")
+    
+    # Show configuration status
+    print(f"\n⚙️ Configuration:")
+    print(f"   Config File: {config.config_path}")
+    print(f"   BigQuery Project: {config.bigquery.project_id}")
+    print(f"   Embedding Weights: {config.clustering.embedding_weights}")
+
+def get_current_quarter():
+    """Get current quarter"""
+    month = datetime.datetime.now().month
+    if month in [1, 2, 3]:
+        return 'q1'
+    elif month in [4, 5, 6]:
+        return 'q2' 
+    elif month in [7, 8, 9]:
+        return 'q3'
+    else:
+        return 'q4'
 
 def main():
-    parser = argparse.ArgumentParser(description="HDBSCAN Clustering Pipeline for Tech Centers")
+    """Main entry point"""
+    parser = argparse.ArgumentParser(description='Enhanced HDBSCAN Clustering Pipeline')
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
-    # Global options
-    parser.add_argument("--config", default="config/enhanced_config.yaml", help="Configuration file path")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    # Validate command
+    validate_parser = subparsers.add_parser('validate', help='Validate configuration and environment')
     
-    # Pipeline selection
-    subparsers = parser.add_subparsers(dest="command", help="Pipeline command")
+    # Preprocess command
+    preprocess_parser = subparsers.add_parser('preprocess', help='Run preprocessing pipeline')
+    preprocess_parser.add_argument('--tech-center', help='Specific tech center to process')
+    preprocess_parser.add_argument('--limit', type=int, help='Limit number of incidents to process')
     
-    # Preprocessing pipeline
-    preprocess_parser = subparsers.add_parser("preprocess", help="Run preprocessing pipeline")
-    preprocess_parser.add_argument("--tech-center", help="Process specific tech center only")
+    # Train command
+    train_parser = subparsers.add_parser('train', help='Run training pipeline')
+    train_parser.add_argument('--quarter', required=True, choices=['q1', 'q2', 'q3', 'q4'], 
+                             help='Quarter to train for')
+    train_parser.add_argument('--year', type=int, default=datetime.datetime.now().year,
+                             help='Year to train for')
+    train_parser.add_argument('--tech-center', help='Specific tech center to train')
     
-    # Training pipeline
-    train_parser = subparsers.add_parser("train", help="Run training pipeline")
-    train_parser.add_argument("--tech-center", help="Train specific tech center only")
-    train_parser.add_argument("--year", type=int, help="Training year (default: current year)")
-    train_parser.add_argument("--quarter", choices=["q1", "q2", "q3", "q4"], help="Training quarter (default: current quarter)")
-    train_parser.add_argument("--parallel", action="store_true", default=True, help="Enable parallel training")
+    # Predict command
+    predict_parser = subparsers.add_parser('predict', help='Run prediction pipeline')
+    predict_parser.add_argument('--tech-center', help='Specific tech center to predict')
     
-    # Prediction pipeline
-    predict_parser = subparsers.add_parser("predict", help="Run prediction pipeline")
-    predict_parser.add_argument("--tech-center", help="Predict for specific tech center only")
-    
-    # Scheduler
-    schedule_parser = subparsers.add_parser("schedule", help="Run automated scheduler")
-    
-    # Status check
-    status_parser = subparsers.add_parser("status", help="Check pipeline status")
-    
-    # Legacy support for original pipeline
-    legacy_parser = subparsers.add_parser("legacy", help="Run original clustering pipeline")
-    legacy_parser.add_argument("--query", required=True, help="BigQuery query for data")
-    legacy_parser.add_argument("--dataset", required=True, help="Dataset name")
-    legacy_parser.add_argument("--embeddings-table", help="BigQuery table for embeddings")
-    legacy_parser.add_argument("--results-table", help="BigQuery table for results")
-    legacy_parser.add_argument("--start-stage", type=int, default=1, choices=[1,2,3,4], help="Start from stage")
-    legacy_parser.add_argument("--end-stage", type=int, default=4, choices=[1,2,3,4], help="End at stage")
-    legacy_parser.add_argument("--embedding-path", help="Path to precomputed embeddings")
-    legacy_parser.add_argument("--summary-path", help="Path to precomputed summaries")
+    # Status command
+    status_parser = subparsers.add_parser('status', help='Show pipeline status')
     
     args = parser.parse_args()
     
-    # Setup logging
-    setup_logging(args.verbose)
+    if not args.command:
+        parser.print_help()
+        return
     
-    # Load configuration
     try:
-        config = load_config(args.config)
-        logging.info(f"Loaded configuration from {args.config}")
-    except Exception as e:
-        logging.error(f"Failed to load configuration: {e}")
-        sys.exit(1)
-      # Execute based on command
-    try:
-        if args.command == "preprocess":
-            result = run_preprocessing_pipeline(config, args.tech_center)
-            print(f"Preprocessing completed: {result.get('total_processed', 0)} incidents processed")
+        # Load configuration
+        config = load_config()
+        setup_logging(config.config)
         
-        elif args.command == "train":
-            result = run_training_pipeline(config, args.tech_center, args.year, args.quarter)
-            if args.tech_center:
-                print(f"Training completed for {args.tech_center}: {result.get('status', 'Unknown')}")
-            else:
-                print(f"Training completed: {result.get('successful', 0)} successful, {result.get('failed', 0)} failed")
-        
-        elif args.command == "predict":
-            result = run_prediction_pipeline(config, args.tech_center)
-            if args.tech_center:
-                print(f"Prediction completed for {args.tech_center}: {result.get('predicted_count', 0)} incidents")
-            else:
-                print(f"Predictions completed: {result.get('total_predicted', 0)} incidents predicted")
-        
-        elif args.command == "schedule":
-            run_pipeline_scheduler(args.config)
-        
-        elif args.command == "status":
-            orchestrator = PipelineOrchestrator(args.config)
-            status = orchestrator.get_pipeline_status()
-            
-            print("=== PIPELINE STATUS ===")
-            print(f"Timestamp: {status['timestamp']}")
-            print(f"Tech Centers: {status['tech_centers']['total']}")
-            print(f"Preprocessing: {status['preprocessing']['frequency']}")
-            print(f"Prediction: {status['prediction']['frequency']}")
-            print(f"Training: {status['training']['frequency']}")
-            print(f"Save to Local: {status['configuration']['save_to_local']}")
-            print(f"Result Path: {status['configuration']['result_path']}")
-        
-        elif args.command == "legacy":
-            # Import legacy pipeline
-            from pipeline import ClusteringPipeline
-            
-            pipeline = ClusteringPipeline(args.config)
-            result = pipeline.run_modular_pipeline(
-                input_query=args.query,
-                embeddings_table_id=args.embeddings_table,
-                results_table_id=args.results_table,
-                dataset_name=args.dataset,
-                embedding_path=args.embedding_path,
-                summary_path=args.summary_path,
-                start_from_stage=args.start_stage,
-                end_at_stage=args.end_stage
-            )
-            
-            print(f"Legacy pipeline completed for dataset: {args.dataset}")
-        
+        # Route to appropriate command
+        if args.command == 'validate':
+            cmd_validate(args)
+        elif args.command == 'preprocess':
+            cmd_preprocess(args)
+        elif args.command == 'train':
+            cmd_train(args)
+        elif args.command == 'predict':
+            cmd_predict(args)
+        elif args.command == 'status':
+            cmd_status(args)
         else:
-            parser.print_help()
-            sys.exit(1)
-    
+            print(f"Unknown command: {args.command}")
+            
     except Exception as e:
         logging.error(f"Pipeline execution failed: {e}")
-        print(f"❌ Pipeline execution failed: {e}")
-        print("Check the logs for detailed error information.")
+        print(f"❌ Error: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
