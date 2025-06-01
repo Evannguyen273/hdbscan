@@ -29,15 +29,43 @@ def test_configuration():
             print("❌ Environment validation failed")
             return False
             
-        # Test config access
+        # Test config access with detailed credential checking
         print(f"   BigQuery Project: {config.bigquery.project_id}")
         print(f"   Tech Centers: {len(config.tech_centers)}")
-        print(f"   Embedding Weights: {config.clustering.embedding_weights}")
         
+        # Test service account credential loading
+        service_account = config.bigquery.service_account_key_path
+        if isinstance(service_account, dict):
+            print("✅ Service account credentials loaded as JSON object")
+            print(f"   Project ID from credentials: {service_account.get('project_id', 'N/A')}")
+        else:
+            print("❌ Service account credentials not properly loaded")
+            return False
+            
+        # Test table configurations
+        tables = config.bigquery.tables
+        print(f"   Incident table: {tables.get('incidents', 'N/A')}")
+        print(f"   Team services table: {tables.get('team_services', 'N/A')}")
+        
+        # Test Azure OpenAI configuration
+        azure_config = config.azure.openai
+        print(f"   Azure OpenAI endpoint: {azure_config.get('endpoint', 'N/A')[:30]}...")
+        print(f"   Embedding model: {azure_config.get('embedding_model', 'N/A')}")
+        
+        # Test blob storage configuration
+        blob_config = config.get('blob_storage', {})
+        blob_conn = blob_config.get('connection_string', '')
+        if blob_conn:
+            print(f"   Blob storage: {blob_conn[:30]}...")
+        else:
+            print("❌ Blob storage connection not configured")
+            
         return True
         
     except Exception as e:
         print(f"❌ Configuration test failed: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def test_bigquery_client():
@@ -142,13 +170,71 @@ def test_environment_variables():
         print("✅ All required environment variables are set")
         return True
 
+def test_credential_parsing():
+    """Test specific credential parsing"""
+    print("\n🔑 Testing credential parsing...")
+    
+    try:
+        import json
+        
+        # Test service account JSON parsing
+        service_account_json = os.getenv('SERVICE_ACCOUNT_KEY_PATH')
+        if service_account_json:
+            try:
+                parsed_creds = json.loads(service_account_json)
+                print("✅ Service account JSON parsed successfully")
+                print(f"   Type: {parsed_creds.get('type', 'N/A')}")
+                print(f"   Project ID: {parsed_creds.get('project_id', 'N/A')}")
+                print(f"   Client email: {parsed_creds.get('client_email', 'N/A')[:20]}...")
+                
+                # Check required fields
+                required_fields = ['type', 'project_id', 'private_key', 'client_email']
+                missing_fields = [field for field in required_fields if field not in parsed_creds]
+                if missing_fields:
+                    print(f"   ❌ Missing required fields: {missing_fields}")
+                    return False
+                else:
+                    print("✅ All required service account fields present")
+                    
+            except json.JSONDecodeError as e:
+                print(f"❌ Failed to parse service account JSON: {e}")
+                return False
+        else:
+            print("❌ SERVICE_ACCOUNT_KEY_PATH not found")
+            return False
+            
+        # Test table name formats
+        tables = {
+            'TEAM_SERVICES_TABLE': os.getenv('TEAM_SERVICES_TABLE'),
+            'INCIDENT_TABLE': os.getenv('INCIDENT_TABLE'),
+            'PROBLEM_TABLE': os.getenv('PROBLEM_TABLE')
+        }
+        
+        for table_name, table_id in tables.items():
+            if table_id and '.' in table_id:
+                parts = table_id.split('.')
+                if len(parts) == 3:
+                    print(f"✅ {table_name}: Valid format (project.dataset.table)")
+                else:
+                    print(f"❌ {table_name}: Invalid format - should be project.dataset.table")
+                    return False
+            else:
+                print(f"❌ {table_name}: Missing or invalid format")
+                return False
+                
+        return True
+        
+    except Exception as e:
+        print(f"❌ Credential parsing test failed: {e}")
+        return False
+
 def main():
     """Run all tests"""
     print("🧪 Running configuration and component tests...")
     print("=" * 60)
-    
-    tests = [
+      tests = [
         test_environment_variables,
+        test_credential_parsing,
         test_configuration,
         test_bigquery_client,
         test_embedding_generator,
