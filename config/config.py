@@ -203,6 +203,27 @@ class ClusteringConfig:
     @property
     def embedding_weights(self) -> Dict[str, float]:
         return self.embedding.get('weights', {'semantic': 1.0, 'entity': 0.0, 'action': 0.0})
+    
+    @property
+    def domain_grouping(self) -> Dict[str, Any]:
+        """Get domain grouping configuration for hybrid approach"""
+        return self.config.get('domain_grouping', {
+            'enabled': True,
+            'max_domains': 20,
+            'min_incidents_per_domain': 5,
+            'optimization_metric': 'combined',
+            'hierarchical_linkage': 'ward'
+        })
+    
+    @property
+    def max_domains(self) -> int:
+        """Get max domains - backward compatibility"""
+        return self.config.get('max_domains', self.domain_grouping.get('max_domains', 20))
+    
+    @property
+    def min_incidents_per_domain(self) -> int:
+        """Get min incidents per domain - backward compatibility"""
+        return self.config.get('min_incidents_per_domain', self.domain_grouping.get('min_incidents_per_domain', 5))
 
 class PipelineConfig:
     """Pipeline configuration wrapper"""

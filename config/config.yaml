@@ -18,7 +18,7 @@ azure:
 
 # BigQuery Configuration
 bigquery:
-  project_id: "your-gcp-project-id"
+  project_id: "enterprise-dashboardnp-cd35"
   
   # Service account configuration
   service_account_key_path: ${SERVICE_ACCOUNT_KEY_PATH}
@@ -28,14 +28,13 @@ bigquery:
     team_services: ${TEAM_SERVICES_TABLE}
     incidents: ${INCIDENT_TABLE}
     raw_incidents: ${INCIDENT_TABLE}  # Alias for compatibility
-    problems: ${PROBLEM_TABLE}
-    preprocessed_incidents: "your-project.preprocessing_pipeline.preprocessed_incidents"
-    clustering_predictions: "your-project.your_dataset.clustering_predictions"
-    preprocessing_watermarks: "your-project.preprocessing_pipeline.preprocessing_watermarks"
+    problems: ${PROBLEM_TABLE}    preprocessed_incidents: "enterprise-dashboardnp-cd35.preprocessing_pipeline.preprocessed_incidents"
+    clustering_predictions: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.clustering_predictions"
+    preprocessing_watermarks: "enterprise-dashboardnp-cd35.preprocessing_pipeline.preprocessing_watermarks"
     
     # Legacy support for original pipeline
-    embeddings_table: "your-project.preprocessing_pipeline.preprocessed_incidents"
-    results_table: "your-project.your_dataset.clustering_predictions"
+    embeddings_table: "enterprise-dashboardnp-cd35.preprocessing_pipeline.preprocessed_incidents"
+    results_table: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.clustering_predictions"
 
 # Azure Blob Storage Configuration
 blob_storage:
@@ -57,6 +56,14 @@ clustering:
     min_samples: 5
     metric: "euclidean"
     cluster_selection_epsilon: 0.0
+  
+  # Domain grouping configuration (from Untitled-1 approach)
+  domain_grouping:
+    enabled: true
+    max_domains: 20
+    min_incidents_per_domain: 5
+    optimization_metric: "combined"  # silhouette, calinski_harabasz, combined
+    hierarchical_linkage: "ward"     # ward, complete, average, single
     
   # UMAP parameters  
   umap:
@@ -79,10 +86,9 @@ clustering:
   min_incidents_per_domain: 5
 
 # Pipeline Configuration
-pipeline:
-  # Output settings
+pipeline:  # Output settings
   save_to_local: true
-  result_path: "/home/azureuser/cloudfiles/code/result_output"
+  result_path: "./results"  # Windows-compatible path
   use_checkpointing: true
   
   # Processing settings

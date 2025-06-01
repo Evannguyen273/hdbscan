@@ -5,7 +5,7 @@ from datetime import datetime
 
 def setup_detailed_logging(log_level=logging.INFO):
     """
-    Setup detailed logging for the summarization pipeline
+    Setup detailed logging for the clustering pipeline
     
     Args:
         log_level: Logging level (logging.INFO, logging.DEBUG, etc.)
@@ -20,10 +20,9 @@ def setup_detailed_logging(log_level=logging.INFO):
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     console_handler.setLevel(log_level)
-    
-    # File handler for detailed logs
+      # File handler for detailed logs
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_filename = f"summarization_pipeline_{timestamp}.log"
+    log_filename = f"clustering_pipeline_{timestamp}.log"
     file_handler = logging.FileHandler(log_filename)
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.DEBUG)  # Always debug level for file
@@ -34,7 +33,8 @@ def setup_detailed_logging(log_level=logging.INFO):
         handlers=[console_handler, file_handler],
         force=True
     )
-      logging.info("Logging setup complete. Detailed logs saved to: %s", log_filename)
+    
+    logging.info("Logging setup complete. Detailed logs saved to: %s", log_filename)
     return log_filename
 
 # Example usage:
