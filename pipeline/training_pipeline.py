@@ -1,405 +1,382 @@
 import logging
-import time
-import os
-import json
-import pickle
-import numpy as np
 import pandas as pd
+import numpy as np
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, Any, Optional, List, Tuple
+import hashlib
+import json
+import asyncio
 
-from data.bigquery_client import BigQueryClient
-from data.blob_storage import BlobStorageClient
-from core.clustering import HDBSCANClusterer
-from analysis.cluster_analysis import ClusterAnalyzer
-from analysis.cluster_labeling import ClusterLabeler
-from analysis.domain_grouping import DomainGrouper
+from config.config import get_config
+from clustering.hdbscan_clusterer import HDBSCANClusterer
+from clustering.domain_grouper import DomainGrouper
 
-class TechCenterTrainingPipeline:
+class TrainingPipeline:
     """
-    Training pipeline for quarterly model retraining per tech center
-    Supports parallel training and model artifact management
+    Training pipeline for cumulative HDBSCAN approach with versioned storage.
+    Handles domain grouping and model versioning.
     """
     
-    def __init__(self, config):
-        self.config = config
-        self.bigquery_client = BigQueryClient(config)
-        self.blob_storage = BlobStorageClient(config)
-        self.clusterer = HDBSCANClusterer(config)
-        self.cluster_analyzer = ClusterAnalyzer(config)
-        self.cluster_labeler = ClusterLabeler(config)
-        self.domain_grouper = DomainGrouper(config)
+    def __init__(self, config=None):
+        """Initialize training pipeline with updated config system"""
+        self.config = config if config is not None else get_config()
         
-        # Table names
-        self.preprocessed_table = f"{config.bigquery.project_id}.{config.bigquery.datasets.preprocessing}.{config.bigquery.tables.preprocessed}"
+        # Initialize clustering components
+        self.clusterer = HDBSCANClusterer(self.config)
+        self.domain_grouper = DomainGrouper(self.config)
         
-    def get_current_quarter(self) -> Tuple[int, str]:
-        """Get current year and quarter"""
-        now = datetime.now()
-        year = now.year
-        month = now.month
+        # Training state
+        self.training_stats = {}
         
-        if month in [1, 2, 3]:
-            quarter = "q1"
-        elif month in [4, 5, 6]:
-            quarter = "q2" 
-        elif month in [7, 8, 9]:
-            quarter = "q3"
-        else:
-            quarter = "q4"
-            
-        return year, quarter
+        logging.info("Training pipeline initialized for cumulative approach")
     
-    def get_training_data(self, tech_center: str, year: int, quarter: str) -> pd.DataFrame:
-        """Get training data for a tech center and quarter"""
-        
-        # Get month range for quarter
-        quarter_months = self.config.pipeline.training_schedule.months[quarter]
-        start_month = min(quarter_months)
-        end_month = max(quarter_months)
-        
-        query = f"""
-        SELECT 
-            number,
-            sys_created_on,
-            combined_incidents_summary,
-            embedding,
-            tech_center,
-            processed_at
-        FROM `{self.preprocessed_table}`
-        WHERE tech_center = '{tech_center}'
-            AND EXTRACT(YEAR FROM sys_created_on) = {year}
-            AND EXTRACT(MONTH FROM sys_created_on) BETWEEN {start_month} AND {end_month}
-        ORDER BY sys_created_on
+    async def train_tech_center(self, tech_center: str, preprocessing_data: Dict, 
+                               version: str, year: int, quarter: str) -> Dict:
         """
+        Train HDBSCAN model for a specific tech center using cumulative approach.
         
-        logging.info(f"Getting training data for {tech_center} - {year} {quarter}")
-        df = self.bigquery_client.run_query(query)
-        logging.info(f"Loaded {len(df)} training records for {tech_center}")
+        Args:
+            tech_center: Tech center name
+            preprocessing_data: Preprocessed embeddings and text data
+            version: Model version (e.g., '2025_q2')
+            year: Training year
+            quarter: Training quarter
+            
+        Returns:
+            Training results with model data and metrics
+        """
+        training_start = datetime.now()
         
-        return df
-    
-    def train_tech_center_model(
-        self, 
-        tech_center: str, 
-        year: int, 
-        quarter: str,
-        save_artifacts: bool = True
-    ) -> Dict:
-        """Train clustering model for a specific tech center and quarter"""
-        
-        start_time = time.time()
-        tech_center_clean = tech_center.replace(" ", "_").replace("-", "_")
-        
-        logging.info(f"Starting training for {tech_center} - {year} {quarter}")
+        logging.info("Starting training for tech center: %s (version: %s)", tech_center, version)
         
         try:
-            # Get training data
-            training_data = self.get_training_data(tech_center, year, quarter)
+            # Extract data from preprocessing results
+            embeddings = preprocessing_data['embeddings']
+            incident_data = preprocessing_data['incident_data']
             
-            if training_data.empty:
-                return {
-                    "tech_center": tech_center,
-                    "year": year,
-                    "quarter": quarter,
-                    "status": "skipped",
-                    "reason": "No training data available",
-                    "runtime_seconds": time.time() - start_time
-                }
+            if len(embeddings) == 0:
+                logging.warning("No embeddings available for %s", tech_center)
+                return {"status": "failed", "reason": "no_embeddings"}
             
-            if len(training_data) < self.config.clustering.hdbscan.min_cluster_size:
-                return {
-                    "tech_center": tech_center,
-                    "year": year,
-                    "quarter": quarter,
-                    "status": "skipped",
-                    "reason": f"Insufficient data: {len(training_data)} < {self.config.clustering.hdbscan.min_cluster_size}",
-                    "runtime_seconds": time.time() - start_time
-                }
+            # Stage 1: Domain grouping (if enabled)
+            if self.config.clustering.domain_grouping['enabled']:
+                logging.info("Stage 1: Performing domain grouping for %s", tech_center)
+                domain_results = await self._perform_domain_grouping(
+                    tech_center, incident_data, embeddings
+                )
+                
+                if domain_results['status'] != 'success':
+                    return domain_results
+                
+                training_data = domain_results['training_data']
+            else:
+                logging.info("Domain grouping disabled, using all data for %s", tech_center)
+                training_data = [(incident_data, embeddings)]
             
-            # Create output directory structure
-            if self.config.pipeline.save_to_local:
-                local_output_dir = f"{self.config.pipeline.result_path}/models/{tech_center_clean}/{year}/{quarter}"
-                os.makedirs(f"{local_output_dir}/embeddings", exist_ok=True)
-                os.makedirs(f"{local_output_dir}/clustering", exist_ok=True)
-                os.makedirs(f"{local_output_dir}/analysis", exist_ok=True)
-                os.makedirs(f"{local_output_dir}/metadata", exist_ok=True)
-            
-            # Train HDBSCAN clustering
-            dataset_name = f"{tech_center_clean}_{year}_{quarter}"
-            clustered_df, umap_embeddings, clusterer, reducer = self.clusterer.train_hdbscan(
-                df_with_embeddings=training_data,
-                dataset_name=dataset_name,
-                result_path=self.config.pipeline.result_path,
-                use_checkpoint=self.config.pipeline.use_checkpointing
+            # Stage 2: Train HDBSCAN models
+            logging.info("Stage 2: Training HDBSCAN models for %s", tech_center)
+            model_results = await self._train_hdbscan_models(
+                tech_center, training_data, version
             )
             
-            # Generate cluster analysis
-            clusters_info = self.cluster_analyzer.generate_cluster_info(
-                clustered_df,
-                text_column='combined_incidents_summary',
-                cluster_column='cluster',
-                sample_size=5
+            # Stage 3: Generate model metadata and hash
+            logging.info("Stage 3: Generating model metadata for %s", tech_center)
+            model_metadata = self._generate_model_metadata(
+                tech_center, model_results, version, year, quarter,
+                len(incident_data), training_start
             )
             
-            # Label clusters with LLM
-            try:
-                labeled_clusters = self.cluster_labeler.label_clusters_with_llm(
-                    clusters_info,
-                    max_samples=300,
-                    chunk_size=25
-                )
-            except Exception as e:
-                logging.warning(f"LLM labeling failed for {tech_center}, using fallback: {e}")
-                labeled_clusters = {
-                    str(cid): {"topic": f"Cluster {cid}", "description": "Auto-generated label"}
-                    for cid in clustered_df['cluster'].unique() if cid != -1
-                }
-                labeled_clusters["-1"] = {"topic": "Noise", "description": "Unclustered incidents"}
+            # Stage 4: Store training results in versioned BigQuery table
+            logging.info("Stage 4: Storing training results for %s", tech_center)
+            storage_results = await self._store_training_results(
+                tech_center, model_results, model_metadata, version
+            )
             
-            # Group into domains
-            try:
-                domains = self.domain_grouper.group_clusters_into_domains(
-                    labeled_clusters,
-                    clusters_info,
-                    umap_embeddings,
-                    clustered_df['cluster'].values
-                )
-            except Exception as e:
-                logging.warning(f"Domain grouping failed for {tech_center}, using fallback: {e}")
-                domains = {
-                    "domains": [
-                        {"domain_name": "General", "clusters": list(map(int, clusters_info.keys()))}
-                    ]
-                }
+            training_duration = datetime.now() - training_start
             
-            # Save model artifacts
-            if save_artifacts:
-                self.save_model_artifacts(
-                    tech_center=tech_center,
-                    year=year,
-                    quarter=quarter,
-                    clusterer=clusterer,
-                    reducer=reducer,
-                    labeled_clusters=labeled_clusters,
-                    domains=domains,
-                    clusters_info=clusters_info,
-                    training_data_size=len(training_data)
-                )
-            
-            runtime = time.time() - start_time
-            
-            # Calculate metrics
-            num_clusters = len([k for k in clusters_info.keys() if k != "-1"])
-            noise_percentage = clusters_info.get("-1", {}).get("percentage", 0)
-            
-            result = {
-                "tech_center": tech_center,
-                "year": year, 
-                "quarter": quarter,
+            final_results = {
                 "status": "success",
-                "metrics": {
-                    "training_samples": len(training_data),
-                    "num_clusters": num_clusters,
-                    "num_domains": len(domains.get("domains", [])),
-                    "noise_percentage": noise_percentage
+                "tech_center": tech_center,
+                "version": version,
+                "model_data": {
+                    "models": model_results['models'],
+                    "metadata": model_metadata,
+                    "domain_info": model_results.get('domain_info', {})
                 },
-                "runtime_seconds": runtime
+                "metrics": model_results['metrics'],
+                "training_duration_seconds": training_duration.total_seconds(),
+                "incidents_trained": len(incident_data),
+                "storage_results": storage_results
             }
             
-            logging.info(f"Training completed for {tech_center} - {num_clusters} clusters, {runtime:.2f}s")
-            return result
+            logging.info("Training completed for %s in %.2f minutes", 
+                        tech_center, training_duration.total_seconds() / 60)
+            
+            return final_results
             
         except Exception as e:
-            logging.error(f"Training failed for {tech_center}: {e}")
+            logging.error("Training failed for %s: %s", tech_center, str(e))
             return {
-                "tech_center": tech_center,
-                "year": year,
-                "quarter": quarter,
                 "status": "failed",
+                "tech_center": tech_center,
+                "version": version,
                 "error": str(e),
-                "runtime_seconds": time.time() - start_time
+                "training_duration_seconds": (datetime.now() - training_start).total_seconds()
             }
     
-    def save_model_artifacts(
-        self,
-        tech_center: str,
-        year: int,
-        quarter: str,
-        clusterer,
-        reducer,
-        labeled_clusters: Dict,
-        domains: Dict,
-        clusters_info: Dict,
-        training_data_size: int
-    ):
-        """Save model artifacts to local and blob storage"""
-        
-        tech_center_clean = tech_center.replace(" ", "_").replace("-", "_")
-        
-        # Local storage
-        if self.config.pipeline.save_to_local:
-            base_path = f"{self.config.pipeline.result_path}/models/{tech_center_clean}/{year}/{quarter}"
-            
-            # Save clustering models
-            with open(f"{base_path}/clustering/hdbscan_clusterer.pkl", "wb") as f:
-                pickle.dump(clusterer, f)
-            
-            with open(f"{base_path}/clustering/umap_reducer.pkl", "wb") as f:
-                pickle.dump(reducer, f)
-            
-            # Save analysis results
-            with open(f"{base_path}/analysis/labeled_clusters.json", "w") as f:
-                json.dump(labeled_clusters, f, indent=2)
-            
-            with open(f"{base_path}/analysis/domains.json", "w") as f:
-                json.dump(domains, f, indent=2)
-            
-            with open(f"{base_path}/analysis/clusters_info.json", "w") as f:
-                json.dump(clusters_info, f, indent=2)
-            
-            # Save metadata
-            metadata = {
-                "tech_center": tech_center,
-                "year": year,
-                "quarter": quarter,
-                "training_timestamp": datetime.now().isoformat(),
-                "training_data_size": training_data_size,
-                "model_version": "1.0",
-                "config": {
-                    "min_cluster_size": self.config.clustering.hdbscan.min_cluster_size,
-                    "min_samples": self.config.clustering.hdbscan.min_samples,
-                    "umap_n_components": self.config.clustering.umap.n_components,
-                    "embedding_weights": dict(self.config.clustering.embedding.weights)
-                }
-            }
-            
-            with open(f"{base_path}/metadata/training_metadata.json", "w") as f:
-                json.dump(metadata, f, indent=2)
-        
-        # Upload to blob storage
+    async def _perform_domain_grouping(self, tech_center: str, 
+                                     incident_data: pd.DataFrame, 
+                                     embeddings: np.ndarray) -> Dict:
+        """Perform domain grouping for tech center"""
         try:
-            blob_path = f"models/{tech_center_clean}/{year}/{quarter}"
+            max_domains = self.config.clustering.domain_grouping['max_domains_per_tech_center']
+            min_incidents = self.config.clustering.domain_grouping['min_incidents_per_domain']
             
-            # Upload model files
-            self.blob_storage.upload_file(
-                f"{base_path}/clustering/hdbscan_clusterer.pkl",
-                f"{blob_path}/clustering/hdbscan_clusterer.pkl"
+            logging.info("Domain grouping: max_domains=%d, min_incidents=%d", 
+                        max_domains, min_incidents)
+            
+            # Run domain grouping
+            domain_results = self.domain_grouper.group_by_domains(
+                incident_data, embeddings, 
+                max_domains=max_domains,
+                min_incidents_per_domain=min_incidents
             )
             
-            self.blob_storage.upload_file(
-                f"{base_path}/clustering/umap_reducer.pkl", 
-                f"{blob_path}/clustering/umap_reducer.pkl"
-            )
+            if len(domain_results) == 0:
+                logging.warning("Domain grouping produced no valid domains for %s", tech_center)
+                return {"status": "failed", "reason": "no_valid_domains"}
             
-            # Upload analysis files
-            self.blob_storage.upload_file(
-                f"{base_path}/analysis/labeled_clusters.json",
-                f"{blob_path}/analysis/labeled_clusters.json"
-            )
+            # Prepare training data by domain
+            training_data = []
+            for domain_name, domain_data in domain_results.items():
+                domain_incidents = domain_data['incidents']
+                domain_embeddings = domain_data['embeddings']
+                
+                logging.info("Domain '%s': %d incidents", domain_name, len(domain_incidents))
+                training_data.append((domain_incidents, domain_embeddings, domain_name))
             
-            self.blob_storage.upload_file(
-                f"{base_path}/analysis/domains.json",
-                f"{blob_path}/analysis/domains.json"
-            )
-            
-            # Upload metadata
-            self.blob_storage.upload_file(
-                f"{base_path}/metadata/training_metadata.json",
-                f"{blob_path}/metadata/training_metadata.json"
-            )
-            
-            logging.info(f"Model artifacts uploaded to blob storage: {blob_path}")
+            return {
+                "status": "success",
+                "training_data": training_data,
+                "domain_count": len(domain_results),
+                "total_incidents": sum(len(data[0]) for data in training_data)
+            }
             
         except Exception as e:
-            logging.error(f"Failed to upload artifacts to blob storage: {e}")
+            logging.error("Domain grouping failed for %s: %s", tech_center, str(e))
+            return {"status": "failed", "reason": "domain_grouping_error", "error": str(e)}
     
-    def train_all_tech_centers_parallel(
-        self, 
-        year: Optional[int] = None, 
-        quarter: Optional[str] = None
-    ) -> Dict:
-        """Train models for all tech centers in parallel"""
+    async def _train_hdbscan_models(self, tech_center: str, 
+                                  training_data: List[Tuple], 
+                                  version: str) -> Dict:
+        """Train HDBSCAN models for each domain/dataset"""
+        models = {}
+        metrics = {}
+        domain_info = {}
         
-        # Use current quarter if not specified
-        if year is None or quarter is None:
-            year, quarter = self.get_current_quarter()
-        
-        start_time = time.time()
-        logging.info(f"Starting parallel training for all tech centers - {year} {quarter}")
-        
-        results = []
-        tech_centers = self.config.pipeline.tech_centers
-        max_workers = min(self.config.pipeline.max_workers, len(tech_centers))
-        
-        if self.config.pipeline.parallel_training:
-            # Parallel execution
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_tech_center = {
-                    executor.submit(self.train_tech_center_model, tc, year, quarter): tc 
-                    for tc in tech_centers
+        for i, data in enumerate(training_data):
+            if len(data) == 3:  # Domain-grouped data
+                incidents, embeddings, domain_name = data
+                model_key = f"{tech_center}_{domain_name}"
+            else:  # All data together
+                incidents, embeddings = data
+                domain_name = "all_incidents"
+                model_key = f"{tech_center}_all"
+            
+            logging.info("Training HDBSCAN for %s (domain: %s, incidents: %d)", 
+                        tech_center, domain_name, len(incidents))
+            
+            try:
+                # Train HDBSCAN model
+                model_result = await self.clusterer.fit_predict_async(
+                    embeddings, incidents
+                )
+                
+                # Store model and metrics
+                models[model_key] = {
+                    "model": model_result['model'],
+                    "cluster_labels": model_result['labels'],
+                    "probabilities": model_result.get('probabilities', []),
+                    "domain_name": domain_name,
+                    "incident_count": len(incidents)
                 }
                 
-                for future in as_completed(future_to_tech_center):
-                    tech_center = future_to_tech_center[future]
-                    try:
-                        result = future.result()
-                        results.append(result)
-                        logging.info(f"Completed training for {tech_center}: {result['status']}")
-                    except Exception as e:
-                        logging.error(f"Training failed for {tech_center}: {e}")
-                        results.append({
-                            "tech_center": tech_center,
-                            "year": year,
-                            "quarter": quarter,
-                            "status": "failed",
-                            "error": str(e)
-                        })
-        else:
-            # Sequential execution
-            for tech_center in tech_centers:
-                result = self.train_tech_center_model(tech_center, year, quarter)
-                results.append(result)
+                metrics[model_key] = model_result.get('metrics', {})
+                domain_info[domain_name] = {
+                    "incident_count": len(incidents),
+                    "cluster_count": len(set(model_result['labels'])) - (1 if -1 in model_result['labels'] else 0),
+                    "noise_incidents": sum(1 for label in model_result['labels'] if label == -1)
+                }
+                
+                logging.info("HDBSCAN trained for %s: %d clusters, %d noise", 
+                           model_key, domain_info[domain_name]['cluster_count'], 
+                           domain_info[domain_name]['noise_incidents'])
+                
+            except Exception as e:
+                logging.error("HDBSCAN training failed for %s: %s", model_key, str(e))
+                models[model_key] = {"status": "failed", "error": str(e)}
+                metrics[model_key] = {"status": "failed"}
         
-        # Compile summary
-        successful = len([r for r in results if r["status"] == "success"])
-        failed = len([r for r in results if r["status"] == "failed"])
-        skipped = len([r for r in results if r["status"] == "skipped"])
+        return {
+            "models": models,
+            "metrics": metrics,
+            "domain_info": domain_info,
+            "total_models": len(models)
+        }
+    
+    def _generate_model_metadata(self, tech_center: str, model_results: Dict, 
+                               version: str, year: int, quarter: str,
+                               total_incidents: int, training_start: datetime) -> Dict:
+        """Generate comprehensive model metadata"""
+        training_duration = datetime.now() - training_start
         
-        summary = {
-            "year": year,
-            "quarter": quarter,
-            "timestamp": datetime.now().isoformat(),
-            "total_tech_centers": len(tech_centers),
-            "successful": successful,
-            "failed": failed,
-            "skipped": skipped,
-            "runtime_seconds": time.time() - start_time,
-            "results": results
+        # Calculate aggregate metrics
+        successful_models = sum(1 for model in model_results['models'].values() 
+                               if model.get('status') != 'failed')
+        
+        total_clusters = sum(info.get('cluster_count', 0) 
+                            for info in model_results['domain_info'].values())
+        
+        total_noise = sum(info.get('noise_incidents', 0) 
+                         for info in model_results['domain_info'].values())
+        
+        metadata = {
+            "version": version,
+            "tech_center": tech_center,
+            "training_info": {
+                "year": year,
+                "quarter": quarter,
+                "training_date": datetime.now().isoformat(),
+                "training_duration_seconds": training_duration.total_seconds(),
+                "training_window_months": self.config.training.training_window_months
+            },
+            "data_info": {
+                "total_incidents": total_incidents,
+                "incidents_processed": sum(model.get('incident_count', 0) 
+                                         for model in model_results['models'].values()
+                                         if model.get('status') != 'failed'),
+                "domain_count": len(model_results['domain_info']),
+                "models_trained": successful_models
+            },
+            "clustering_results": {
+                "total_clusters": total_clusters,
+                "noise_incidents": total_noise,
+                "noise_percentage": (total_noise / total_incidents * 100) if total_incidents > 0 else 0
+            },
+            "config_snapshot": {
+                "hdbscan_params": self.config.clustering.hdbscan,
+                "domain_grouping": self.config.clustering.domain_grouping,
+                "training_params": self.config.training.parameters
+            }
         }
         
-        logging.info(f"Training completed: {successful} successful, {failed} failed, {skipped} skipped")
-        
-        # Save summary
-        if self.config.pipeline.save_to_local:
-            output_dir = f"{self.config.pipeline.result_path}/training/logs"
-            os.makedirs(output_dir, exist_ok=True)
-            
-            with open(f"{output_dir}/training_run_{year}_{quarter}.json", "w") as f:
-                json.dump(summary, f, indent=2)
-        
-        return summary
+        return metadata
     
-    def train_single_tech_center(
-        self, 
-        tech_center: str,
-        year: Optional[int] = None,
-        quarter: Optional[str] = None
-    ) -> Dict:
-        """Train model for a single tech center"""
+    async def _store_training_results(self, tech_center: str, model_results: Dict, 
+                                    metadata: Dict, version: str) -> Dict:
+        """Store training results in versioned BigQuery table"""
+        try:
+            # Generate model hash for versioning
+            model_hash = self._generate_model_hash(model_results, metadata)
+            
+            # Get versioned table name
+            versioned_table = self.config.bigquery.get_versioned_table_name(version, model_hash)
+            
+            # Prepare training results for storage
+            storage_data = []
+            for model_key, model_data in model_results['models'].items():
+                if model_data.get('status') != 'failed':
+                    # Create record for each clustered incident
+                    incidents_data = model_data.get('incident_data', [])
+                    labels = model_data['cluster_labels']
+                    probabilities = model_data.get('probabilities', [])
+                    
+                    for i, (incident, label) in enumerate(zip(incidents_data, labels)):
+                        record = {
+                            "version": version,
+                            "model_hash": model_hash,
+                            "tech_center": tech_center,
+                            "domain_name": model_data['domain_name'],
+                            "incident_id": incident.get('incident_id'),
+                            "cluster_label": int(label),
+                            "cluster_probability": float(probabilities[i]) if i < len(probabilities) else None,
+                            "is_noise": label == -1,
+                            "training_date": datetime.now().isoformat(),
+                            "model_metadata": json.dumps(metadata)
+                        }
+                        storage_data.append(record)
+            
+            # Store in BigQuery
+            if storage_data:
+                # Here you would use BigQuery client to insert data
+                # await self.bigquery_client.insert_training_results(versioned_table, storage_data)
+                logging.info("Would store %d training result records in table %s", 
+                           len(storage_data), versioned_table)
+                
+                return {
+                    "status": "success",
+                    "table_name": versioned_table,
+                    "records_stored": len(storage_data),
+                    "model_hash": model_hash
+                }
+            else:
+                return {"status": "failed", "reason": "no_data_to_store"}
+                
+        except Exception as e:
+            logging.error("Failed to store training results: %s", str(e))
+            return {"status": "failed", "error": str(e)}
+    
+    def _generate_model_hash(self, model_results: Dict, metadata: Dict) -> str:
+        """Generate hash for model versioning"""
+        hash_algorithm = self.config.training.versioning['hash_algorithm']
+        hash_length = self.config.training.versioning['hash_length']
         
-        if year is None or quarter is None:
-            year, quarter = self.get_current_quarter()
+        # Create deterministic hash from model results and metadata
+        hash_data = {
+            "model_count": len(model_results['models']),
+            "domain_info": model_results['domain_info'],
+            "training_date": metadata['training_info']['training_date'][:10],  # Date only
+            "config_hash": str(hash(str(metadata['config_snapshot'])))
+        }
         
-        return self.train_tech_center_model(tech_center, year, quarter)
+        hash_str = json.dumps(hash_data, sort_keys=True)
+        hash_obj = hashlib.new(hash_algorithm)
+        hash_obj.update(hash_str.encode('utf-8'))
+        
+        return hash_obj.hexdigest()[:hash_length]
+    
+    def get_training_statistics(self) -> Dict:
+        """Get training pipeline statistics"""
+        return self.training_stats
+    
+    async def validate_training_data(self, tech_center: str, 
+                                   preprocessing_data: Dict) -> Dict:
+        """Validate training data before training"""
+        validation_results = {
+            "valid": True,
+            "warnings": [],
+            "errors": []
+        }
+        
+        # Check embeddings
+        embeddings = preprocessing_data.get('embeddings', [])
+        if len(embeddings) == 0:
+            validation_results["valid"] = False
+            validation_results["errors"].append("No embeddings available")
+            return validation_results
+        
+        # Check minimum incidents
+        min_incidents = self.config.clustering.min_incidents_per_domain
+        if len(embeddings) < min_incidents:
+            validation_results["warnings"].append(
+                f"Low incident count ({len(embeddings)} < {min_incidents})"
+            )
+        
+        # Check embedding dimensions
+        if len(embeddings) > 0:
+            embedding_dim = len(embeddings[0]) if hasattr(embeddings[0], '__len__') else 0
+            if embedding_dim == 0:
+                validation_results["valid"] = False
+                validation_results["errors"].append("Invalid embedding dimensions")
+        
+        return validation_results

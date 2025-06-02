@@ -1,3 +1,6 @@
+# Configuration Manager for HDBSCAN Pipeline
+# Updated for cumulative training with versioned storage architecture
+
 import yaml
 import os
 import json
@@ -7,13 +10,12 @@ import logging
 from dotenv import load_dotenv
 
 class Config:
-    """Configuration manager that handles both config.yaml and enhanced_config.yaml"""
+    """Configuration manager for consolidated config.yaml"""
     
     def __init__(self, config_path: Optional[str] = None):
         # Load environment variables
         self._load_environment()
-        
-        # Determine config file
+          # Determine config file
         if config_path is None:
             config_path = self._get_default_config_path()
         
@@ -27,29 +29,25 @@ class Config:
         # Validate configuration
         self._validate_config()
         
-        logging.info(f"Configuration loaded from: {config_path}")
+        logging.info("Configuration loaded from: %s", config_path)
     
     def _load_environment(self):
         """Load environment variables from .env file"""
         env_file = Path(__file__).parent.parent / '.env'
         if env_file.exists():
             load_dotenv(env_file)
-            logging.info(f"Loaded environment variables from {env_file}")
+            logging.info("Loaded environment variables from %s", env_file)
         else:
             logging.warning("No .env file found, using system environment variables")
     
     def _get_default_config_path(self) -> str:
         """Get default config path using config.yaml"""
         config_dir = Path(__file__).parent
-        
-        # Use main config file
         main_config = config_dir / 'config.yaml'
         if main_config.exists():
             return str(main_config)
-        
         raise FileNotFoundError("Configuration file not found: config.yaml")
-    
-    def _load_config(self, config_path: str) -> Dict[str, Any]:
+      def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load YAML configuration file"""
         try:
             with open(config_path, 'r') as file:
@@ -67,10 +65,9 @@ class Config:
             env_var = obj[2:-1]  # Remove ${ and }
             env_value = os.getenv(env_var)
             if env_value is None:
-                logging.warning(f"Environment variable {env_var} not found")
+                logging.warning("Environment variable %s not found", env_var)
                 return obj
-            
-            # Handle JSON strings (like SERVICE_ACCOUNT_KEY_PATH)
+              # Handle JSON strings
             if env_var == 'SERVICE_ACCOUNT_KEY_PATH':
                 try:
                     return json.loads(env_value)
@@ -83,13 +80,12 @@ class Config:
     
     def _validate_config(self):
         """Validate that required configuration sections exist"""
-        required_sections = ['bigquery', 'azure', 'clustering']
+        required_sections = ['bigquery', 'azure', 'clustering', 'training', 'prediction']
         
         for section in required_sections:
             if section not in self.config:
-                raise ValueError(f"Required configuration section '{section}' not found")
-        
-        # Validate required environment variables
+                logging.warning("Configuration section '%s' not found, using defaults", section)
+          # Validate required environment variables
         required_env_vars = [
             'AZURE_OPENAI_ENDPOINT',
             'OPENAI_API_KEY',
@@ -98,8 +94,8 @@ class Config:
         
         missing_vars = [var for var in required_env_vars if not os.getenv(var)]
         if missing_vars:
-            logging.error(f"Missing required environment variables: {missing_vars}")
-            raise ValueError(f"Missing required environment variables: {missing_vars}")
+            logging.error("Missing required environment variables: %s", missing_vars)
+            raise ValueError("Missing required environment variables: %s" % missing_vars)
     
     def get(self, key_path: str, default=None):
         """Get configuration value using dot notation"""
@@ -130,17 +126,41 @@ class Config:
         return ClusteringConfig(self.config.get('clustering', {}))
     
     @property
-    def pipeline(self):
-        """Get pipeline configuration"""
-        return PipelineConfig(self.config.get('pipeline', {}))
+    def training(self):
+        """Get training configuration"""
+        return TrainingConfig(self.config.get('training', {}))
+    
+    @property
+    def prediction(self):
+        """Get prediction configuration"""
+        return PredictionConfig(self.config.get('prediction', {}))
     
     @property
     def tech_centers(self):
-        """Get list of tech centers"""
-        return self.config.get('tech_centers', [])
+        """Get tech centers configuration"""
+        if 'tech_centers' in self.config:
+            tech_centers_config = self.config['tech_centers']
+            if isinstance(tech_centers_config, dict):
+                # New format with primary/additional
+                primary = tech_centers_config.get('primary', [])
+                additional = tech_centers_config.get('additional', [])
+                
+                # Convert primary list to names
+                primary_names = []
+                for tc in primary:
+                    if isinstance(tc, dict) and 'name' in tc:
+                        primary_names.append(tc['name'])
+                    else:
+                        primary_names.append(str(tc))
+                
+                return primary_names + additional
+            else:
+                # Old format - simple list
+                return tech_centers_config
+        return []
 
 class BigQueryConfig:
-    """BigQuery configuration wrapper"""
+    """BigQuery configuration wrapper with versioned storage support"""
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -160,6 +180,26 @@ class BigQueryConfig:
     def get_table_id(self, table_name: str) -> str:
         """Get full table ID for a table name"""
         return self.tables.get(table_name, '')
+    
+    def get_versioned_table_name(self, version: str, hash_suffix: str) -> str:
+        """Get versioned table name for training results"""
+        template = self.tables.get('training_results_template', 'clustering_predictions_{version}_{hash}')
+        return template.format(version=version, hash=hash_suffix)
+    
+    @property
+    def predictions_table(self) -> str:
+        """Get predictions table name"""
+        return self.tables.get('predictions', 'incident_predictions')
+    
+    @property
+    def model_registry_table(self) -> str:
+        """Get model registry table name"""
+        return self.tables.get('model_registry', 'model_registry')
+    
+    @property
+    def preprocessed_incidents_table(self) -> str:
+        """Get preprocessed incidents table name"""
+        return self.tables.get('preprocessed_incidents', 'preprocessed_incidents')
 
 class AzureConfig:
     """Azure configuration wrapper"""
@@ -173,14 +213,9 @@ class AzureConfig:
         return self.config.get('openai', {})
     
     @property
-    def storage(self):
-        """Get storage configuration"""
-        return self.config.get('storage', {})
-    
-    @property
     def blob_storage(self):
         """Get blob storage configuration"""
-        return self.config.get('blob_storage', self.storage)
+        return self.config.get('blob_storage', {})
 
 class ClusteringConfig:
     """Clustering configuration wrapper"""
@@ -197,67 +232,120 @@ class ClusteringConfig:
         return self.config.get('umap', {})
     
     @property
-    def embedding(self) -> Dict[str, Any]:
-        return self.config.get('embedding', {})
-    
-    @property
-    def embedding_weights(self) -> Dict[str, float]:
-        return self.embedding.get('weights', {'semantic': 1.0, 'entity': 0.0, 'action': 0.0})
-    
-    @property
     def domain_grouping(self) -> Dict[str, Any]:
-        """Get domain grouping configuration for hybrid approach"""
+        """Get domain grouping configuration"""
         return self.config.get('domain_grouping', {
             'enabled': True,
-            'max_domains': 20,
+            'max_domains_per_tech_center': 20,
             'min_incidents_per_domain': 5,
-            'optimization_metric': 'combined',
-            'hierarchical_linkage': 'ward'
+            'similarity_threshold': 0.7
         })
     
     @property
     def max_domains(self) -> int:
         """Get max domains - backward compatibility"""
-        return self.config.get('max_domains', self.domain_grouping.get('max_domains', 20))
+        return self.domain_grouping.get('max_domains_per_tech_center', 20)
     
     @property
     def min_incidents_per_domain(self) -> int:
         """Get min incidents per domain - backward compatibility"""
-        return self.config.get('min_incidents_per_domain', self.domain_grouping.get('min_incidents_per_domain', 5))
+        return self.domain_grouping.get('min_incidents_per_domain', 5)
 
-class PipelineConfig:
-    """Pipeline configuration wrapper"""
+class TrainingConfig:
+    """Training configuration wrapper for cumulative training"""
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
     
     @property
-    def save_to_local(self) -> bool:
-        return self.config.get('save_to_local', True)
+    def schedule(self) -> Dict[str, Any]:
+        """Get training schedule configuration"""
+        return self.config.get('schedule', {
+            'frequency': 'semi_annual',
+            'months': [6, 12],
+            'training_window_months': 24
+        })
     
     @property
-    def result_path(self) -> str:
-        return self.config.get('result_path', 'results/')
+    def frequency(self) -> str:
+        """Get training frequency"""
+        return self.schedule.get('frequency', 'semi_annual')
     
     @property
-    def parallel_training(self) -> bool:
-        return self.config.get('parallel_training', False)
+    def training_window_months(self) -> int:
+        """Get training window in months (cumulative approach)"""
+        return self.schedule.get('training_window_months', 24)
     
     @property
-    def max_workers(self) -> int:
-        return self.config.get('max_workers', 4)
+    def parameters(self) -> Dict[str, Any]:
+        """Get training parameters"""
+        return self.config.get('parameters', {})
     
     @property
-    def training_schedule(self) -> Dict[str, Any]:
-        return self.config.get('training_schedule', {})
+    def versioning(self) -> Dict[str, Any]:
+        """Get model versioning configuration"""
+        return self.config.get('versioning', {
+            'version_format': '{year}_q{quarter}',
+            'hash_algorithm': 'sha256',
+            'hash_length': 8
+        })
     
     @property
-    def preprocessing(self) -> Dict[str, Any]:
-        return self.config.get('preprocessing', {})
+    def processing(self) -> Dict[str, Any]:
+        """Get processing configuration"""
+        return self.config.get('processing', {
+            'parallel_tech_centers': True,
+            'max_workers': 4,
+            'timeout_hours': 6,
+            'batch_size': 1000,
+            'max_incidents_per_training': 100000
+        })
+
+class PredictionConfig:
+    """Prediction configuration wrapper for real-time classification"""
+    
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
     
     @property
-    def prediction(self) -> Dict[str, Any]:
-        return self.config.get('prediction', {})
+    def schedule(self) -> Dict[str, Any]:
+        """Get prediction schedule configuration"""
+        return self.config.get('schedule', {
+            'frequency_minutes': 120,
+            'batch_size': 500,
+            'timeout_minutes': 30
+        })
+    
+    @property
+    def frequency_minutes(self) -> int:
+        """Get prediction frequency in minutes"""
+        return self.schedule.get('frequency_minutes', 120)
+    
+    @property
+    def batch_size(self) -> int:
+        """Get prediction batch size"""
+        return self.schedule.get('batch_size', 500)
+    
+    @property
+    def model_loading(self) -> Dict[str, Any]:
+        """Get model loading configuration"""
+        return self.config.get('model_loading', {
+            'cache_models': True,
+            'cache_ttl_hours': 24,
+            'version_strategy': 'latest',
+            'fallback_version': '2024_q4',
+            'preload_models': True
+        })
+    
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        """Get prediction parameters"""
+        return self.config.get('parameters', {
+            'min_confidence_score': 0.3,
+            'high_confidence_threshold': 0.8,
+            'max_distance_to_cluster': 2.0,
+            'enable_domain_prediction': True
+        })
 
 # Global configuration instance
 _config_instance = None
@@ -309,5 +397,5 @@ def validate_environment() -> bool:
         logging.info("✅ Configuration validation successful")
         return True
     except Exception as e:
-        logging.error(f"❌ Configuration validation failed: {e}")
+        logging.error("❌ Configuration validation failed: %s", e)
         return False

@@ -11,6 +11,8 @@ import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 import logging
+import asyncio
+from dataclasses import dataclass
 
 from data.bigquery_client import BigQueryClient
 from data.blob_storage import BlobStorageClient
@@ -20,15 +22,40 @@ from utils.error_handler import PipelineLogger, catch_errors
 from config.config import load_config
 
 
+@dataclass
+class ModelCache:
+    """Model cache entry"""
+    model: Any
+    metadata: Dict
+    loaded_at: datetime
+    tech_center: str
+    version: str
+    
+    def is_expired(self, ttl_hours: int) -> bool:
+        """Check if cache entry is expired"""
+        return (datetime.now() - self.loaded_at).total_seconds() > ttl_hours * 3600
+
 class PredictionPipeline:
     """
-    Prediction pipeline for classifying new incidents using trained HDBSCAN models
-    Runs every 2 hours to process new incidents
+    Real-time prediction pipeline for incident classification using cached HDBSCAN models.
+    Supports model versioning and 2-hour prediction cycles.
     """
     
-    def __init__(self, config):
-        self.config = config
-        self.logger = PipelineLogger("prediction")
+    def __init__(self, config=None):
+        """Initialize prediction pipeline with updated config system"""
+        self.config = config if config is not None else load_config()
+        
+        # Model cache for performance
+        self.model_cache: Dict[str, ModelCache] = {}
+        
+        # Prediction statistics
+        self.prediction_stats = {
+            "total_predictions": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "prediction_errors": 0,
+            "last_prediction_time": None
+        }
         
         # Initialize clients
         self.bigquery_client = BigQueryClient(config)
@@ -48,7 +75,84 @@ class PredictionPipeline:
         self.logger.info("Prediction pipeline initialized with optimized storage architecture")
     
     @catch_errors
-    def run_predictions_all_tech_centers(self) -> Dict[str, Any]:
+    async def predict_batch(self, incidents: pd.DataFrame, 
+                          tech_centers: List[str]) -> List[Dict]:
+        """
+        Predict clusters for a batch of incidents across multiple tech centers.
+        
+        Args:
+            incidents: DataFrame with incident data
+            tech_centers: List of tech centers to predict for
+            
+        Returns:
+            List of prediction results
+        """
+        prediction_start = datetime.now()
+        
+        self.logger.info("Starting batch prediction for %d incidents across %d tech centers",
+                    len(incidents), len(tech_centers))
+        
+        try:
+            # Group incidents by tech center
+            incidents_by_tc = self._group_incidents_by_tech_center(incidents, tech_centers)
+            
+            # Preload models for all tech centers
+            await self._preload_models(tech_centers)
+            
+            # Process predictions for each tech center
+            all_predictions = []
+            
+            for tech_center, tc_incidents in incidents_by_tc.items():
+                if len(tc_incidents) == 0:
+                    continue
+                
+                self.logger.info("Predicting for %s: %d incidents", tech_center, len(tc_incidents))
+                
+                tc_predictions = await self._predict_tech_center(tech_center, tc_incidents)
+                all_predictions.extend(tc_predictions)
+            
+            # Update statistics
+            prediction_duration = datetime.now() - prediction_start
+            self.prediction_stats["total_predictions"] += len(all_predictions)
+            self.prediction_stats["last_prediction_time"] = datetime.now().isoformat()
+            
+            self.logger.info("Batch prediction completed: %d predictions in %.2f seconds",
+                        len(all_predictions), prediction_duration.total_seconds())
+            
+            return all_predictions
+            
+        except Exception as e:
+            self.logger.error("Batch prediction failed: %s", str(e))
+            self.prediction_stats["prediction_errors"] += 1
+            raise
+    
+    @catch_errors
+    async def predict_single_incident(self, incident: Dict, tech_center: str) -> Dict:
+        """
+        Predict cluster for a single incident.
+        
+        Args:
+            incident: Incident data
+            tech_center: Tech center name
+            
+        Returns:
+            Prediction result
+        """
+        try:
+            # Convert to DataFrame for consistency
+            incident_df = pd.DataFrame([incident])
+            
+            # Get prediction
+            predictions = await self._predict_tech_center(tech_center, incident_df)
+            
+            return predictions[0] if predictions else {"status": "failed", "reason": "no_prediction"}
+            
+        except Exception as e:
+            self.logger.error("Single incident prediction failed: %s", str(e))
+            return {"status": "failed", "error": str(e)}
+    
+    @catch_errors
+    async def run_predictions_all_tech_centers(self) -> Dict[str, Any]:
         """
         Run predictions for all tech centers
         Returns summary of prediction results
@@ -70,7 +174,7 @@ class PredictionPipeline:
                 self.logger.log_progress(i + 1, len(self.config.pipeline.tech_centers), "tech centers")
                 
                 # Run prediction for individual tech center
-                center_result = self.run_prediction_for_tech_center(tech_center)
+                center_result = await self.run_prediction_for_tech_center(tech_center)
                 
                 results["tech_center_results"][tech_center] = center_result
                 results["total_predicted"] += center_result.get("predicted_count", 0)
@@ -91,22 +195,22 @@ class PredictionPipeline:
         return results
     
     @catch_errors
-    def run_prediction_for_tech_center(self, tech_center: str) -> Dict[str, Any]:
+    async def run_prediction_for_tech_center(self, tech_center: str) -> Dict[str, Any]:
         """
         Run predictions for a specific tech center
         """
         self.logger.log_stage_start(f"prediction_{tech_center}", {"tech_center": tech_center})
         
         # Get latest model info
-        model_info = self._get_latest_model_info(tech_center)
+        model_info = await self._get_latest_model_info(tech_center)
         if not model_info:
             raise ValueError(f"No trained model found for tech center: {tech_center}")
         
         # Load trained models
-        models = self._load_models_for_tech_center(tech_center, model_info)
+        models = await self._load_models_for_tech_center(tech_center, model_info)
         
         # Get new incidents since last prediction
-        new_incidents = self._get_new_incidents_for_tech_center(tech_center)
+        new_incidents = await self._get_new_incidents_for_tech_center(tech_center)
         
         if len(new_incidents) == 0:
             self.logger.log_stage_complete(f"prediction_{tech_center}", {
@@ -120,13 +224,13 @@ class PredictionPipeline:
             }
         
         # Process and predict
-        predictions = self._predict_incidents(new_incidents, models, tech_center)
+        predictions = await self._predict_incidents(new_incidents, models, tech_center)
         
         # Store predictions
-        self._store_predictions(predictions, tech_center)
+        await self._store_predictions(predictions, tech_center)
         
         # Update watermark
-        self._update_prediction_watermark(tech_center, new_incidents)
+        await self._update_prediction_watermark(tech_center, new_incidents)
         
         result = {
             "predicted_count": len(predictions),
@@ -140,7 +244,7 @@ class PredictionPipeline:
         self.logger.log_stage_complete(f"prediction_{tech_center}", result)
         return result
     
-    def _get_latest_model_info(self, tech_center: str) -> Optional[Dict[str, Any]]:
+    async def _get_latest_model_info(self, tech_center: str) -> Optional[Dict[str, Any]]:
         """
         Get information about the latest trained model for tech center
         """
@@ -176,7 +280,7 @@ class PredictionPipeline:
             logging.error(f"Failed to get model info for {tech_center}: {e}")
             return None
     
-    def _load_models_for_tech_center(self, tech_center: str, model_info: Dict[str, Any]) -> Dict[str, Any]:
+    async def _load_models_for_tech_center(self, tech_center: str, model_info: Dict[str, Any]) -> Dict[str, Any]:
         """
         Load trained models (HDBSCAN, UMAP, etc.) for tech center
         """
@@ -233,13 +337,13 @@ class PredictionPipeline:
             except Exception as e2:
                 raise RuntimeError(f"Failed to load model from {blob_path}: {e}, {e2}")
     
-    def _get_new_incidents_for_tech_center(self, tech_center: str) -> pd.DataFrame:
+    async def _get_new_incidents_for_tech_center(self, tech_center: str) -> pd.DataFrame:
         """
         Get new incidents for tech center since last prediction
         """
         try:
             # Get last prediction timestamp (watermark)
-            last_prediction_time = self._get_prediction_watermark(tech_center)
+            last_prediction_time = await self._get_prediction_watermark(tech_center)
             
             # Query for new incidents
             query = f"""
@@ -272,7 +376,7 @@ class PredictionPipeline:
         except Exception as e:
             raise RuntimeError(f"Failed to get new incidents for {tech_center}: {e}")
     
-    def _get_prediction_watermark(self, tech_center: str) -> datetime:
+    async def _get_prediction_watermark(self, tech_center: str) -> datetime:
         """
         Get the timestamp of last prediction for tech center
         """
@@ -300,7 +404,7 @@ class PredictionPipeline:
             logging.warning(f"Failed to get watermark for {tech_center}, using default: {e}")
             return datetime.now() - timedelta(hours=2)
     
-    def _predict_incidents(self, incidents: pd.DataFrame, models: Dict[str, Any], tech_center: str) -> List[Dict[str, Any]]:
+    async def _predict_incidents(self, incidents: pd.DataFrame, models: Dict[str, Any], tech_center: str) -> List[Dict[str, Any]]:
         """
         Predict cluster assignments for new incidents
         """
@@ -402,7 +506,7 @@ class PredictionPipeline:
         except Exception:
             return 0.5  # Default confidence if calculation fails
     
-    def _store_predictions(self, predictions: List[Dict[str, Any]], tech_center: str):
+    async def _store_predictions(self, predictions: List[Dict[str, Any]], tech_center: str):
         """
         Store predictions to BigQuery
         """
@@ -459,7 +563,7 @@ class PredictionPipeline:
         except Exception as e:
             logging.error(f"Failed to save predictions locally for {tech_center}: {e}")
     
-    def _update_prediction_watermark(self, tech_center: str, incidents: pd.DataFrame):
+    async def _update_prediction_watermark(self, tech_center: str, incidents: pd.DataFrame):
         """
         Update the prediction watermark timestamp
         """
@@ -504,15 +608,15 @@ class PredictionPipeline:
         return distribution
     
     @catch_errors
-    def get_prediction_status(self, tech_center: Optional[str] = None) -> Dict[str, Any]:
+    async def get_prediction_status(self, tech_center: Optional[str] = None) -> Dict[str, Any]:
         """
         Get status of prediction pipeline
         """
         try:
             if tech_center:
                 # Status for specific tech center
-                watermark = self._get_prediction_watermark(tech_center)
-                model_info = self._get_latest_model_info(tech_center)
+                watermark = await self._get_prediction_watermark(tech_center)
+                model_info = await self._get_latest_model_info(tech_center)
                 
                 return {
                     "tech_center": tech_center,
@@ -533,7 +637,7 @@ class PredictionPipeline:
                 }
                 
                 for tc in self.config.pipeline.tech_centers:
-                    tc_status = self.get_prediction_status(tc)
+                    tc_status = await self.get_prediction_status(tc)
                     status["tech_centers"][tc] = tc_status
                     
                     if tc_status["status"] == "active":

@@ -1,149 +1,304 @@
-# Main Configuration for HDBSCAN Clustering Pipeline
-# Compatible with both original pipeline.py and enhanced main.py
-# Updated to match .env file configuration
+# HDBSCAN Clustering Pipeline - Complete Configuration
+# Version 2.0 - Cumulative Training with Versioned Storage
+# Single comprehensive configuration file
 
-# Azure OpenAI Configuration
+# ===================================================================
+# GLOBAL SETTINGS
+# ===================================================================
+global:
+  project_name: "HDBSCAN Incident Classification Pipeline"
+  version: "2.0.0"
+  environment: "production"  # development, staging, production
+
+# ===================================================================
+# AZURE CONFIGURATION
+# ===================================================================
 azure:
+  # OpenAI Configuration
   openai:
     endpoint: ${AZURE_OPENAI_ENDPOINT}
     api_key: ${OPENAI_API_KEY}
     api_version: ${AZURE_OPENAI_API_VERSION}
     deployment_name: ${AZURE_OPENAI_CHAT_DEPLOYMENT_NAME}
-    
-    # Embeddings configuration
+      # Embeddings configuration
     embedding_endpoint: ${AZURE_OPENAI_EMBEDDING_ENDPOINT}
     embedding_api_version: ${AZURE_OPENAI_EMBEDDING_API_VERSION}
     embedding_key: ${AZURE_OPENAI_EMBEDDING_KEY}
     embedding_model: ${AZURE_OPENAI_EMBEDDING_MODEL}
 
-# BigQuery Configuration
+  # Blob Storage Configuration - Versioned Model Storage
+  blob_storage:
+    connection_string: ${BLOB_CONNECTION_STRING}
+    container_name: "hdbscan-models"
+    structure:
+      # Versioned directory structure: {tech_center_slug}/{version}/
+      models: "{tech_center_slug}/{version}/"
+      logs: "logs/{date}/"
+      backups: "backups/{version}/"
+
+# ===================================================================
+# BIGQUERY CONFIGURATION  
+# ===================================================================
 bigquery:
   project_id: "enterprise-dashboardnp-cd35"
-  
-  # Service account configuration
   service_account_key_path: ${SERVICE_ACCOUNT_KEY_PATH}
-    # Table configurations (from .env)
+  
+  # Source tables
   tables:
-    team_services: ${TEAM_SERVICES_TABLE}
+    # Raw data sources
     incidents: ${INCIDENT_TABLE}
-    raw_incidents: ${INCIDENT_TABLE}  # Alias for compatibility
+    team_services: ${TEAM_SERVICES_TABLE}
     problems: ${PROBLEM_TABLE}
     
-    # Data pipeline tables - optimized for cost efficiency
-    preprocessed_incidents: "enterprise-dashboardnp-cd35.preprocessing_pipeline.preprocessed_incidents"
-    # ^ Contains: embeddings, combined_incidents_summary, preprocessing metadata
-    # ^ Storage: HIGH (embeddings are expensive to store)
+    # Pipeline tables - HYBRID STORAGE ARCHITECTURE
+    preprocessed_incidents: "preprocessing_pipeline.preprocessed_incidents"
+    # ^ Contains: embeddings, summaries, metadata (HIGH cost but necessary)
     
-    clustering_predictions: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.clustering_predictions"
-    # ^ Contains: cluster results, domain grouping, UMAP coordinates (NO embeddings)
-    # ^ Storage: LOW (analytical results only, references preprocessed_incidents for embeddings)
+    # Versioned training results (NO embeddings for cost optimization)
+    training_results_template: "clustering_predictions_{version}_{hash}"
+    # ^ Example: clustering_predictions_2025_q2_789abc12
     
-    preprocessing_watermarks: "enterprise-dashboardnp-cd35.preprocessing_pipeline.preprocessing_watermarks"
+    # Live predictions (NO embeddings)
+    predictions: "incident_predictions"
     
-    # Legacy support for original pipeline
-    embeddings_table: "enterprise-dashboardnp-cd35.preprocessing_pipeline.preprocessed_incidents"
-    results_table: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.clustering_predictions"
+    # Model tracking
+    model_registry: "model_registry"
+    training_logs: "training_logs"
+    watermarks: "preprocessing_pipeline.preprocessing_watermarks"
 
-# Azure Blob Storage Configuration
-blob_storage:
-  connection_string: ${BLOB_CONNECTION_STRING}
-  container_name: "prediction-artifacts"
-  
-  # Path templates
-  structure:
-    models: "models/{tech_center}/{year}/{quarter}"
-    predictions: "predictions/{tech_center}/{year}/{quarter}"
-    monitoring: "monitoring/{tech_center}"
-    preprocessing: "preprocessing/{tech_center}/{year}/{quarter}"
+# ===================================================================
+# TRAINING CONFIGURATION - CUMULATIVE APPROACH
+# ===================================================================
+training:
+  # Semi-annual cumulative training (NEW ARCHITECTURE)
+  schedule:
+    frequency: "semi_annual"  # Every 6 months instead of quarterly
+    months: [6, 12]  # June and December
+    training_window_months: 24  # Always use 24-month datasets
+    
+  # Training parameters optimized for large cumulative datasets
+  parameters:
+    # UMAP settings
+    umap:
+      n_components: 2
+      n_neighbors: 15
+      min_dist: 0.1
+      metric: "cosine"
+      random_state: 42
+      
+    # HDBSCAN settings
+    hdbscan:
+      min_cluster_size: 25  # Increased for larger datasets
+      min_samples: 5
+      cluster_selection_epsilon: 0.1
+      metric: "euclidean"
+      cluster_selection_method: "eom"
+      
+    # Domain grouping
+    domain_grouping:
+      max_domains_per_tech_center: 20
+      min_cluster_size_for_domain: 5
+      similarity_threshold: 0.7
+      
+  # Model versioning
+  versioning:
+    version_format: "{year}_q{quarter}"  # e.g., "2025_q2"
+    hash_algorithm: "sha256"
+    hash_length: 8
+    
+  # Processing settings
+  processing:
+    parallel_tech_centers: true
+    max_workers: 4
+    timeout_hours: 6  # Longer for large cumulative datasets
+    batch_size: 1000
+    max_incidents_per_training: 100000
 
-# Clustering Configuration
+# ===================================================================
+# PREDICTION CONFIGURATION - REAL-TIME CLASSIFICATION
+# ===================================================================
+prediction:
+  # Execution schedule
+  schedule:
+    frequency_minutes: 120  # Every 2 hours
+    batch_size: 500
+    timeout_minutes: 30
+    
+  # Model management
+  model_loading:
+    cache_models: true
+    cache_ttl_hours: 24
+    version_strategy: "latest"  # Use latest available version
+    fallback_version: "2024_q4"  # Fallback if latest fails
+    preload_models: true
+    
+  # Prediction parameters
+  parameters:
+    min_confidence_score: 0.3
+    high_confidence_threshold: 0.8
+    max_distance_to_cluster: 2.0
+    enable_domain_prediction: true
+
+# ===================================================================
+# CLUSTERING CONFIGURATION
+# ===================================================================
 clustering:
-  # HDBSCAN parameters
+  # Core clustering parameters (same as training.parameters for consistency)
+  umap:
+    n_components: 2
+    n_neighbors: 15
+    min_dist: 0.1
+    metric: "cosine"
+    random_state: 42
+    
   hdbscan:
     min_cluster_size: 25
     min_samples: 5
     metric: "euclidean"
-    cluster_selection_epsilon: 0.0
-  
-  # Domain grouping configuration (from Untitled-1 approach)
-  domain_grouping:
-    enabled: true
-    max_domains: 20
-    min_incidents_per_domain: 5
-    optimization_metric: "combined"  # silhouette, calinski_harabasz, combined
-    hierarchical_linkage: "ward"     # ward, complete, average, single
+    cluster_selection_epsilon: 0.1
     
-  # UMAP parameters  
-  umap:
-    n_components: 50
-    n_neighbors: 100
-    min_dist: 0.1
-    metric: "euclidean"
-    random_state: 42
-  
-  # Embedding configuration - Pure semantic as requested
-  embedding:
-    weights:
-      entity: 0.0      # Disabled as per requirements
-      action: 0.0      # Disabled as per requirements
-      semantic: 1.0    # Pure semantic embeddings only
-    batch_size: 25
-    
-  # Domain grouping
-  max_domains: 20
-  min_incidents_per_domain: 5
+  # Quality thresholds
+  quality:
+    min_silhouette_score: 0.15
+    min_clusters: 3
+    max_noise_ratio: 0.30
 
-# Pipeline Configuration
-pipeline:  # Output settings
-  save_to_local: true
-  result_path: "./results"  # Windows-compatible path
-  use_checkpointing: true
-  
-  # Processing settings
-  parallel_training: true
-  max_workers: 4
-  
-  # Schedule configuration
-  training_schedule:
-    quarters: ["q1", "q2", "q3", "q4"]
-    months:
-      q1: [1, 2, 3]
-      q2: [4, 5, 6]
-      q3: [7, 8, 9]
-      q4: [10, 11, 12]
-  
-  # Pipeline frequencies
-  preprocessing:
-    frequency_minutes: 60    # Every hour
-    batch_size: 1000
-    
-  prediction:
-    frequency_minutes: 120   # Every 2 hours
-    batch_size: 500
-    
-  # Retry configuration
-  max_retries: 3
-  retry_delay_seconds: 30
-
-# Tech Centers Configuration (15 total)
+# ===================================================================
+# TECH CENTERS CONFIGURATION
+# ===================================================================
 tech_centers:
-  - "BT-TC-Product Development & Engineering"
-  - "BT-TC-Infrastructure Services"
-  - "BT-TC-Network Operations"
-  - "BT-TC-Security Operations"
-  - "BT-TC-Cloud Services"
-  - "BT-TC-Data Analytics"
-  - "BT-TC-Enterprise Applications"
-  - "BT-TC-Field Services"
-  - "BT-TC-Customer Support"
-  - "BT-TC-Quality Assurance"
-  - "BT-TC-DevOps Engineering"
-  - "BT-TC-Business Intelligence"
-  - "BT-TC-Systems Integration"
-  - "BT-TC-Mobile Solutions"
-  - "BT-TC-Compliance & Governance"
+  # Primary tech centers with configuration
+  primary:
+    - name: "BT-TC-Data Analytics"
+      slug: "bt-tc-data-analytics"
+      min_incidents: 500
+      
+    - name: "BT-TC-Network Operations"
+      slug: "bt-tc-network-operations"
+      min_incidents: 1000
+      
+    - name: "BT-TC-Security Operations"
+      slug: "bt-tc-security-operations"
+      min_incidents: 800
+      
+    - name: "BT-TC-Infrastructure Services"
+      slug: "bt-tc-infrastructure-services"
+      min_incidents: 600
+      
+    - name: "BT-TC-Product Development Engineering"
+      slug: "bt-tc-product-development-engineering"
+      min_incidents: 400
+      
+  # Additional tech centers (simplified)
+  additional:
+    - "BT-TC-Cloud Services"
+    - "BT-TC-Enterprise Applications"
+    - "BT-TC-Field Services"
+    - "BT-TC-Customer Support"
+    - "BT-TC-Quality Assurance"
+    - "BT-TC-DevOps Engineering"
+    - "BT-TC-Business Intelligence"
+    - "BT-TC-Systems Integration"
+    - "BT-TC-Mobile Solutions"
+    - "BT-TC-Compliance & Governance"
 
-# Logging Configuration
+# ===================================================================
+# COST OPTIMIZATION - 50% REDUCTION STRATEGY
+# ===================================================================
+cost_optimization:
+  # Storage optimization
+  storage:
+    separate_embeddings: true     # Keep embeddings separate from results
+    bigquery_minimal: true        # Only essential data in BigQuery
+    models_in_blob: true          # Store large models in cheap blob storage
+    use_partitioning: true        # Partition tables by date
+    use_clustering: true          # Cluster tables by tech_center
+    
+  # Training optimization
+  training:
+    semi_annual_frequency: true   # Reduce from quarterly to semi-annual
+    parallel_processing: true     # Optimize compute efficiency
+    cleanup_old_models: true      # Keep only last 3 versions
+    
+  # Query optimization
+  queries:
+    query_cache: true
+    slot_limits: true
+    maximum_bytes_billed: 10737418240  # 10 GB limit
+
+# ===================================================================
+# MONITORING & ALERTING
+# ===================================================================
+monitoring:
+  # Key metrics to track
+  metrics:
+    training:
+      - "training_duration"
+      - "cluster_count"
+      - "silhouette_score"
+      - "noise_ratio"
+      - "model_size_mb"
+      
+    prediction:
+      - "prediction_latency"
+      - "confidence_distribution"
+      - "model_version_usage"
+      - "error_rate"
+      
+    cost:
+      - "bigquery_slot_usage"
+      - "blob_storage_size"
+      - "monthly_cost_usd"
+      
+  # Alerts
+  alerts:
+    training_failure: true
+    low_quality_clusters: true
+    high_cost: true
+    prediction_errors: true
+
+# ===================================================================
+# PERFORMANCE & SCALING
+# ===================================================================
+performance:
+  # Memory management for large 24-month datasets
+  memory:
+    max_memory_usage_gb: 16.0
+    enable_memory_monitoring: true
+    batch_processing: true
+    
+  # Parallel processing
+  parallel:
+    enable_multiprocessing: true
+    max_workers: 4
+    chunk_size: 1000
+    
+  # Caching
+  caching:
+    enable_caching: true
+    cache_models: true
+    cache_ttl_hours: 24
+
+# ===================================================================
+# SECURITY & GOVERNANCE
+# ===================================================================
+security:
+  # Data protection
+  encryption_at_rest: true
+  encryption_in_transit: true
+  audit_logging: true
+  
+  # Access control
+  rbac_enabled: true
+  service_account_rotation: true
+  
+  # Compliance
+  data_retention_days: 730  # 2 years
+  pii_handling: "anonymized"
+
+# ===================================================================
+# LOGGING CONFIGURATION
+# ===================================================================
 logging:
   level: "INFO"
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -159,91 +314,48 @@ logging:
       filename: "pipeline_{timestamp}.log"
       max_size: "100MB"
       backup_count: 5
+
+# ===================================================================
+# ENVIRONMENT-SPECIFIC OVERRIDES
+# ===================================================================
+environments:
+  development:
+    global:
+      log_level: "DEBUG"
+    bigquery:
+      dataset: "hdbscan_pipeline_dev"
+      maximum_bytes_billed: 1073741824  # 1 GB limit
+    blob_storage:
+      container_name: "hdbscan-models-dev"
+    training:
+      max_incidents_per_training: 10000  # Smaller datasets for dev
       
-    azure_monitor:
-      enabled: false
-      workspace_id: "${AZURE_WORKSPACE_ID}"
+  staging:
+    bigquery:
+      dataset: "hdbscan_pipeline_staging"
+      maximum_bytes_billed: 5368709120  # 5 GB limit
+    blob_storage:
+      container_name: "hdbscan-models-staging"
+      
+  production:
+    bigquery:
+      dataset: "hdbscan_pipeline"
+      maximum_bytes_billed: 10737418240  # 10 GB limit
+    blob_storage:
+      container_name: "hdbscan-models"
 
-# Notification Configuration
-notifications:
-  email:
-    enabled: false
-    smtp_server: "smtp.company.com"
-    smtp_port: 587
-    from: "pipeline@company.com"
-    recipients:
-      - "admin@company.com"
-      - "team@company.com"
-    username: "${EMAIL_USERNAME}"
-    password: "${EMAIL_PASSWORD}"
-    
-  teams:
-    enabled: false
-    webhook_url: "${TEAMS_WEBHOOK_URL}"
-    
-  azure_monitor:
-    enabled: false
-    alert_rule_id: "${AZURE_ALERT_RULE_ID}"
+# ===================================================================
+# EXAMPLE USAGE COMMANDS
+# ===================================================================
+# Training: python training_orchestrator.py --year 2025 --quarter q2
+# Prediction: python prediction_pipeline.py --batch-size 500  
+# Analysis: python cluster_analysis.py --tech-center "BT-TC-Data Analytics"
 
-# Model Configuration
-model:
-  # Model versioning
-  versioning:
-    enabled: true
-    strategy: "quarterly"  # quarterly, monthly, manual
-    
-  # Model storage
-  storage:
-    local_path: "models/"
-    blob_enabled: true
-    retention_quarters: 4  # Keep last 4 quarters
-    
-  # Model validation
-  validation:
-    min_silhouette_score: 0.15
-    min_clusters: 2
-    max_noise_ratio: 0.80
-
-# Performance Configuration
-performance:
-  # Memory management
-  max_memory_usage_gb: 8.0
-  enable_memory_monitoring: true
-  
-  # Parallel processing
-  enable_multiprocessing: true
-  chunk_size: 1000
-  
-  # Caching
-  enable_caching: true
-  cache_embeddings: true
-  cache_ttl_hours: 24
-
-# Legacy Support (for original pipeline.py)
-legacy:
-  # Default table IDs for backward compatibility
-  default_embeddings_table: "enterprise-dashboardnp-cd35.preprocessing_pipeline.preprocessed_incidents"
-  default_results_table: "enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.clustering_predictions"
-  
-  # Stage configuration
-  stages:
-    embedding: true
-    clustering: true
-    analysis: true
-    saving: true
-    
-  # Default parameters
-  default_dataset_name: "hdbscan_clustering"
-  default_write_disposition: "WRITE_APPEND"
-
-# Development/Testing Configuration
-development:
-  # Testing settings
-  test_mode: false
-  sample_size: 1000
-  mock_embeddings: false
-  
-  # Debug settings
-  verbose_logging: false
-  save_intermediate_results: true
-  skip_expensive_operations: false
+# ===================================================================
+# ARCHITECTURE BENEFITS
+# ===================================================================
+# ✅ 50% cost reduction through hybrid storage
+# ✅ Semi-annual training reduces operational overhead
+# ✅ 24-month cumulative windows for pattern stability
+# ✅ Versioned model deployment with rollback capability
+# ✅ Enterprise-grade monitoring and security

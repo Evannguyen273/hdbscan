@@ -1,240 +1,279 @@
+# preprocessing/embedding_generation.py
+# Updated for new config structure and cumulative training approach
 import logging
-import time
-import json
-import requests
 import numpy as np
 import pandas as pd
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
+import asyncio
 import openai
-from openai import AzureOpenAI
-import os
+from openai import AsyncAzureOpenAI
+import time
+from datetime import datetime
+
+from config.config import get_config
 
 class EmbeddingGenerator:
-    def __init__(self, config):
-        self.config = config
-        
-        # Get Azure OpenAI configuration
-        azure_config = config.get('azure', {})
-        openai_config = azure_config.get('openai', {})
-        
-        # Initialize Azure OpenAI client for embeddings
-        embedding_endpoint = openai_config.get('embedding_endpoint', '')
-        if '/openai/deployments' in embedding_endpoint:
-            base_endpoint = embedding_endpoint.split('/openai/deployments')[0]
-        else:
-            base_endpoint = embedding_endpoint
-            
-        self.embedding_client = AzureOpenAI(
-            api_key=openai_config.get('embedding_key', ''),
-            api_version=openai_config.get('embedding_api_version', ''),
-            azure_endpoint=base_endpoint
-        )
-        
-        # Initialize Azure OpenAI client for chat (summaries)
-        self.chat_client = AzureOpenAI(
-            api_key=openai_config.get('api_key', ''),
-            api_version=openai_config.get('api_version', ''),
-            azure_endpoint=openai_config.get('endpoint', '')
-        )
-        
-        self.embedding_model = openai_config.get('embedding_model', 'text-embedding-3-large')
-        self.chat_deployment = openai_config.get('deployment_name', 'gpt-4o')
-        
-        # Embedding configuration - Pure semantic as requested
-        clustering_config = config.get('clustering', {})
-        self.embedding_weights = clustering_config.get('embedding', {}).get('weights', {
-            'semantic': 1.0, 'entity': 0.0, 'action': 0.0
-        })
-        self.batch_size = clustering_config.get('embedding', {}).get('batch_size', 25)
-        
-        logging.info(f"EmbeddingGenerator initialized with model: {self.embedding_model}")
-        logging.info(f"Embedding weights: {self.embedding_weights}")
+    """
+    Embedding generator for Azure OpenAI with batch processing support.
+    Updated for cumulative training approach.
+    """
     
-    def generate_incident_summary(self, short_description: str, description: str, max_retries: int = 3) -> str:
-        """Generate AI-powered incident summary using Azure OpenAI"""
+    def __init__(self, config=None):
+        """Initialize embedding generator with updated config system"""
+        self.config = config if config is not None else get_config()
         
-        # Combine short description and full description
-        combined_text = f"Title: {short_description}\nDetails: {description}"
+        # Initialize Azure OpenAI client
+        self._init_azure_client()
         
-        prompt = f"""
-        Analyze this IT incident and create a concise, technical summary focusing on the core issue:
-
-        {combined_text}
-
-        Instructions:
-        - Identify the main technical problem or issue
-        - Extract key technical components (systems, applications, errors)
-        - Remove unnecessary details and user-specific information
-        - Focus on the root cause or symptom
-        - Keep it under 100 words
-        - Use technical terminology where appropriate
-
-        Summary:
-        """
-        
-        for attempt in range(max_retries):
-            try:
-                response = self.chat_client.chat.completions.create(
-                    model=self.chat_deployment,
-                    messages=[
-                        {"role": "system", "content": "You are an IT incident analyst who creates concise technical summaries."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.1,
-                    max_tokens=150
-                )
-                
-                summary = response.choices[0].message.content.strip()
-                
-                # Clean up the summary
-                if summary.startswith("Summary:"):
-                    summary = summary[8:].strip()
-                
-                return summary
-                
-            except Exception as e:
-                logging.warning(f"Summary generation attempt {attempt + 1} failed: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff
-                else:
-                    logging.error(f"Failed to generate summary after {max_retries} attempts")
-                    # Fallback to simple text processing
-                    return self._simple_summary_fallback(short_description, description)
-    
-    def _simple_summary_fallback(self, short_description: str, description: str) -> str:
-        """Simple fallback summary when AI generation fails"""
-        # Take first 150 characters of combined text
-        combined = f"{short_description}. {description}"
-        if len(combined) <= 150:
-            return combined
-        return combined[:147] + "..."
-    
-    def generate_embedding(self, text: str, max_retries: int = 3) -> Optional[List[float]]:
-        """Generate embedding for a single text using Azure OpenAI"""
-        
-        for attempt in range(max_retries):
-            try:
-                response = self.embedding_client.embeddings.create(
-                    model=self.embedding_model,
-                    input=text
-                )
-                
-                embedding = response.data[0].embedding
-                
-                # Apply embedding weights (pure semantic as configured)
-                if self.embedding_weights['semantic'] != 1.0:
-                    # Scale embedding if semantic weight is not 1.0
-                    embedding = [x * self.embedding_weights['semantic'] for x in embedding]
-                
-                return embedding
-                
-            except Exception as e:
-                logging.warning(f"Embedding generation attempt {attempt + 1} failed: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff
-                else:
-                    logging.error(f"Failed to generate embedding after {max_retries} attempts")
-                    return None
-    
-    def generate_embeddings_batch(self, texts: List[str], show_progress: bool = True) -> List[Optional[List[float]]]:
-        """Generate embeddings for a batch of texts"""
-        embeddings = []
-        total_texts = len(texts)
-        
-        # Process in batches to avoid rate limits
-        for i in range(0, total_texts, self.batch_size):
-            batch = texts[i:i + self.batch_size]
-            batch_embeddings = []
-            
-            for j, text in enumerate(batch):
-                if show_progress and (i + j) % 10 == 0:
-                    logging.info(f"Processing embedding {i + j + 1}/{total_texts}")
-                
-                embedding = self.generate_embedding(text)
-                batch_embeddings.append(embedding)
-                
-                # Small delay to avoid rate limiting
-                time.sleep(0.1)
-            
-            embeddings.extend(batch_embeddings)
-            
-            # Longer delay between batches
-            if i + self.batch_size < total_texts:
-                time.sleep(1)
-        
-        return embeddings
-    
-    def process_incidents_with_embeddings(self, incidents_df: pd.DataFrame) -> pd.DataFrame:
-        """Process incidents to generate summaries and embeddings"""
-        
-        processed_incidents = incidents_df.copy()
-        
-        # Generate AI summaries
-        logging.info("Generating AI-powered incident summaries...")
-        summaries = []
-        
-        for idx, row in incidents_df.iterrows():
-            if idx % 10 == 0:
-                logging.info(f"Processing summary {idx + 1}/{len(incidents_df)}")
-            
-            summary = self.generate_incident_summary(
-                row.get('short_description', ''),
-                row.get('description', '')
-            )
-            summaries.append(summary)
-            
-            # Small delay to avoid rate limiting
-            time.sleep(0.2)
-        
-        processed_incidents['combined_incidents_summary'] = summaries
-        
-        # Generate embeddings from summaries
-        logging.info("Generating semantic embeddings...")
-        embeddings = self.generate_embeddings_batch(summaries)
-        
-        # Filter out failed embeddings
-        valid_indices = [i for i, emb in enumerate(embeddings) if emb is not None]
-        
-        if len(valid_indices) < len(embeddings):
-            logging.warning(f"Failed to generate {len(embeddings) - len(valid_indices)} embeddings")
-            processed_incidents = processed_incidents.iloc[valid_indices].copy()
-            embeddings = [embeddings[i] for i in valid_indices]
-        
-        processed_incidents['embedding'] = embeddings
-        processed_incidents['processed_timestamp'] = pd.Timestamp.now()
-        
-        logging.info(f"Successfully processed {len(processed_incidents)} incidents with embeddings")
-        
-        return processed_incidents
-    
-    def validate_embeddings(self, embeddings: List[List[float]]) -> Dict[str, Any]:
-        """Validate embedding quality and return metrics"""
-        if not embeddings:
-            return {"valid": False, "error": "No embeddings provided"}
-        
-        # Convert to numpy array for analysis
-        embedding_matrix = np.array(embeddings)
-        
-        # Check for NaN or infinite values
-        has_nan = np.any(np.isnan(embedding_matrix))
-        has_inf = np.any(np.isinf(embedding_matrix))
-        
-        if has_nan or has_inf:
-            return {
-                "valid": False, 
-                "error": f"Invalid values detected - NaN: {has_nan}, Inf: {has_inf}"
-            }
-        
-        # Calculate basic statistics
-        dimensions = embedding_matrix.shape[1]
-        variance = np.var(embedding_matrix)
-        mean_norm = np.mean(np.linalg.norm(embedding_matrix, axis=1))
-        
-        return {
-            "valid": True,
-            "count": len(embeddings),
-            "dimensions": dimensions,
-            "variance": float(variance),
-            "mean_norm": float(mean_norm),
-            "embedding_weights_used": self.embedding_weights
+        # Processing statistics
+        self.generation_stats = {
+            "total_embeddings_generated": 0,
+            "total_api_calls": 0,
+            "total_processing_time": 0,
+            "batch_successes": 0,
+            "batch_failures": 0
         }
+        
+        logging.info("Embedding generator initialized with Azure OpenAI")
+    
+    def _init_azure_client(self):
+        """Initialize Azure OpenAI client"""
+        azure_config = self.config.azure.openai
+        
+        self.client = AsyncAzureOpenAI(
+            azure_endpoint=azure_config.get('endpoint'),
+            api_key=azure_config.get('api_key'),
+            api_version=azure_config.get('api_version', '2024-02-01')
+        )
+        
+        self.embedding_model = azure_config.get('embedding_model', 'text-embedding-ada-002')
+        self.max_retries = azure_config.get('max_retries', 3)
+        self.retry_delay = azure_config.get('retry_delay_seconds', 1)
+    
+    async def generate_embeddings_batch(self, texts: List[str], 
+                                      batch_size: int = 50,
+                                      use_batch_api: bool = True) -> Tuple[np.ndarray, List[int]]:
+        """
+        Generate embeddings for a batch of texts using Azure OpenAI.
+        
+        Args:
+            texts: List of texts to embed
+            batch_size: Size of batches for API calls
+            use_batch_api: Whether to use batch embedding API
+            
+        Returns:
+            Tuple of (embeddings_array, valid_indices)
+        """
+        generation_start = datetime.now()
+        
+        logging.info("Generating embeddings for %d texts (batch_size=%d)", 
+                    len(texts), batch_size)
+        
+        try:
+            # Filter out empty/invalid texts
+            valid_texts, valid_indices = self._filter_valid_texts(texts)
+            
+            if len(valid_texts) == 0:
+                logging.warning("No valid texts found for embedding generation")
+                return np.array([]), []
+            
+            # Generate embeddings in batches
+            all_embeddings = []
+            
+            for i in range(0, len(valid_texts), batch_size):
+                batch_texts = valid_texts[i:i+batch_size]
+                batch_start_idx = i
+                
+                try:
+                    batch_embeddings = await self._generate_batch_embeddings(
+                        batch_texts, batch_start_idx
+                    )
+                    
+                    if len(batch_embeddings) > 0:
+                        all_embeddings.extend(batch_embeddings)
+                        self.generation_stats["batch_successes"] += 1
+                    else:
+                        self.generation_stats["batch_failures"] += 1
+                        logging.warning("Batch %d failed to generate embeddings", 
+                                      batch_start_idx // batch_size)
+                
+                except Exception as e:
+                    logging.error("Batch %d embedding generation failed: %s", 
+                                batch_start_idx // batch_size, str(e))
+                    self.generation_stats["batch_failures"] += 1
+                    continue
+            
+            # Convert to numpy array
+            if all_embeddings:
+                embeddings_array = np.array(all_embeddings)
+                
+                # Update statistics
+                generation_duration = datetime.now() - generation_start
+                self.generation_stats["total_embeddings_generated"] += len(embeddings_array)
+                self.generation_stats["total_processing_time"] += generation_duration.total_seconds()
+                
+                logging.info("Generated %d embeddings in %.2f seconds", 
+                           len(embeddings_array), generation_duration.total_seconds())
+                
+                return embeddings_array, valid_indices
+            else:
+                logging.error("No embeddings generated successfully")
+                return np.array([]), []
+                
+        except Exception as e:
+            logging.error("Embedding generation failed: %s", str(e))
+            return np.array([]), []
+    
+    async def _generate_batch_embeddings(self, texts: List[str], 
+                                       batch_start_idx: int) -> List[List[float]]:
+        """Generate embeddings for a single batch"""
+        for attempt in range(self.max_retries):
+            try:
+                logging.debug("Generating embeddings for batch starting at %d (attempt %d)", 
+                            batch_start_idx, attempt + 1)
+                
+                # Call Azure OpenAI API
+                response = await self.client.embeddings.create(
+                    input=texts,
+                    model=self.embedding_model
+                )
+                
+                # Extract embeddings from response
+                embeddings = []
+                for embedding_data in response.data:
+                    embeddings.append(embedding_data.embedding)
+                
+                self.generation_stats["total_api_calls"] += 1
+                
+                logging.debug("Successfully generated %d embeddings for batch %d", 
+                            len(embeddings), batch_start_idx)
+                
+                return embeddings
+                
+            except openai.RateLimitError as e:
+                wait_time = self.retry_delay * (2 ** attempt)
+                logging.warning("Rate limit hit for batch %d, waiting %.1f seconds", 
+                              batch_start_idx, wait_time)
+                await asyncio.sleep(wait_time)
+                
+            except openai.APIError as e:
+                logging.error("API error for batch %d: %s", batch_start_idx, str(e))
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay)
+                else:
+                    raise
+                    
+            except Exception as e:
+                logging.error("Unexpected error for batch %d: %s", batch_start_idx, str(e))
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay)
+                else:
+                    raise
+        
+        # If all retries failed
+        logging.error("All retry attempts failed for batch %d", batch_start_idx)
+        return []
+    
+    def _filter_valid_texts(self, texts: List[str]) -> Tuple[List[str], List[int]]:
+        """Filter out empty or invalid texts"""
+        valid_texts = []
+        valid_indices = []
+        
+        for i, text in enumerate(texts):
+            if isinstance(text, str) and text.strip():
+                # Truncate if too long (Azure OpenAI has token limits)
+                if len(text) > 8000:  # Rough character limit
+                    text = text[:8000] + "..."
+                
+                valid_texts.append(text.strip())
+                valid_indices.append(i)
+            else:
+                logging.debug("Skipping invalid text at index %d", i)
+        
+        logging.info("Filtered %d valid texts from %d total", 
+                    len(valid_texts), len(texts))
+        
+        return valid_texts, valid_indices
+    
+    async def generate_single_embedding(self, text: str) -> Optional[List[float]]:
+        """Generate embedding for a single text"""
+        try:
+            embeddings, _ = await self.generate_embeddings_batch([text], batch_size=1)
+            
+            if len(embeddings) > 0:
+                return embeddings[0].tolist()
+            else:
+                return None
+                
+        except Exception as e:
+            logging.error("Single embedding generation failed: %s", str(e))
+            return None
+    
+    def get_generation_statistics(self) -> Dict[str, Any]:
+        """Get embedding generation statistics"""
+        stats = self.generation_stats.copy()
+        
+        # Calculate derived metrics
+        if stats["batch_successes"] + stats["batch_failures"] > 0:
+            stats["batch_success_rate"] = (
+                stats["batch_successes"] / 
+                (stats["batch_successes"] + stats["batch_failures"]) * 100
+            )
+        else:
+            stats["batch_success_rate"] = 0
+        
+        if stats["total_api_calls"] > 0:
+            stats["avg_embeddings_per_call"] = (
+                stats["total_embeddings_generated"] / stats["total_api_calls"]
+            )
+        else:
+            stats["avg_embeddings_per_call"] = 0
+        
+        if stats["total_processing_time"] > 0:
+            stats["embeddings_per_second"] = (
+                stats["total_embeddings_generated"] / stats["total_processing_time"]
+            )
+        else:
+            stats["embeddings_per_second"] = 0
+        
+        return stats
+    
+    def validate_configuration(self) -> Dict[str, Any]:
+        """Validate embedding generation configuration"""
+        validation_results = {
+            "valid": True,
+            "warnings": [],
+            "errors": []
+        }
+        
+        azure_config = self.config.azure.openai
+        
+        # Check required configuration
+        if not azure_config.get('endpoint'):
+            validation_results["errors"].append("Azure OpenAI endpoint not configured")
+            validation_results["valid"] = False
+        
+        if not azure_config.get('api_key'):
+            validation_results["errors"].append("Azure OpenAI API key not configured")
+            validation_results["valid"] = False
+        
+        if not azure_config.get('embedding_model'):
+            validation_results["warnings"].append("Embedding model not specified, using default")
+        
+        # Check model availability (this would require an API call in practice)
+        embedding_model = azure_config.get('embedding_model', 'text-embedding-ada-002')
+        if embedding_model not in ['text-embedding-ada-002', 'text-embedding-3-small', 'text-embedding-3-large']:
+            validation_results["warnings"].append(f"Unknown embedding model: {embedding_model}")
+        
+        return validation_results
+    
+    def reset_statistics(self):
+        """Reset generation statistics"""
+        self.generation_stats = {
+            "total_embeddings_generated": 0,
+            "total_api_calls": 0,
+            "total_processing_time": 0,
+            "batch_successes": 0,
+            "batch_failures": 0
+        }
+        logging.info("Embedding generation statistics reset")

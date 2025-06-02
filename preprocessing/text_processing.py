@@ -1,378 +1,409 @@
+# preprocessing/text_processing.py
+# Updated for new config structure and cumulative training approach
 import logging
-import time
 import pandas as pd
+import numpy as np
+from typing import List, Dict, Any, Optional, Tuple
 import re
-import json
-import uuid
-from typing import Tuple, List, Dict, Set
-from tqdm.auto import tqdm
+import asyncio
+from datetime import datetime
+import openai
+from openai import AsyncAzureOpenAI
+
+from config.config import get_config
 
 class TextProcessor:
-    """Enhanced text processing with improved error handling and no fallbacks"""
+    """
+    Text processor for incident data with Azure OpenAI summarization.
+    Handles cleaning, preprocessing, and summarization for cumulative training.
+    """
     
-    def __init__(self, config):
-        self.config = config
-        self.openai_client = self._initialize_openai_client()
+    def __init__(self, config=None):
+        """Initialize text processor with updated config system"""
+        self.config = config if config is not None else get_config()
         
-        # Track failed incident numbers for reporting
-        self.failed_incidents: Set[str] = set()
-        self.failure_reasons: Dict[str, str] = {}
+        # Initialize Azure OpenAI client for summarization
+        self._init_azure_client()
         
-    def _initialize_openai_client(self):
-        """Initialize OpenAI client from config"""
-        import openai
-        return openai.AzureOpenAI(
-            azure_endpoint=self.config.azure_openai.endpoint,
-            api_key=self.config.azure_openai.api_key,
-            api_version=self.config.azure_openai.api_version
+        # Processing statistics
+        self.processing_stats = {
+            "texts_processed": 0,
+            "texts_cleaned": 0,
+            "texts_summarized": 0,
+            "summarization_failures": 0,
+            "total_processing_time": 0
+        }
+        
+        # Get text processing configuration
+        self.text_config = self._get_text_processing_config()
+        
+        logging.info("Text processor initialized with Azure OpenAI summarization")
+    
+    def _init_azure_client(self):
+        """Initialize Azure OpenAI client for summarization"""
+        azure_config = self.config.azure.openai
+        
+        self.client = AsyncAzureOpenAI(
+            azure_endpoint=azure_config.get('endpoint'),
+            api_key=azure_config.get('api_key'),
+            api_version=azure_config.get('api_version', '2024-02-01')
         )
+        
+        self.summarization_model = azure_config.get('summarization_model', 'gpt-35-turbo')
+        self.max_retries = azure_config.get('max_retries', 3)
+        self.retry_delay = azure_config.get('retry_delay_seconds', 1)
     
-    def estimate_tokens(self, text: str) -> int:
-        """Estimate token count for text"""
-        if not text:
-            return 0
-        return len(text) // 4 + 1
+    def _get_text_processing_config(self) -> Dict[str, Any]:
+        """Get text processing configuration with defaults"""
+        azure_config = self.config.azure.config
+        
+        return {
+            "enable_summarization": azure_config.get('enable_summarization', True),
+            "summarization_batch_size": azure_config.get('summarization_batch_size', 10),
+            "max_input_length": azure_config.get('max_input_length', 4000),
+            "max_summary_length": azure_config.get('max_summary_length', 200),
+            "clean_text": azure_config.get('clean_text', True),
+            "remove_urls": azure_config.get('remove_urls', True),
+            "remove_emails": azure_config.get('remove_emails', True),
+            "normalize_whitespace": azure_config.get('normalize_whitespace', True),
+            "min_text_length": azure_config.get('min_text_length', 10)
+        }
     
-    def chunk_text_for_summarization(self, text: str, max_input_tokens: int = 100000) -> List[str]:
+    async def process_texts_for_training(self, texts: List[str], 
+                                       batch_size: int = 10) -> Tuple[pd.Series, List[int], Dict]:
         """
-        Split text into chunks if it's too long for summarization.
+        Process texts for training with cleaning and summarization.
         
         Args:
-            text: Input text to potentially chunk
-            max_input_tokens: Maximum tokens per chunk
+            texts: List of raw texts to process
+            batch_size: Batch size for summarization
             
         Returns:
-            List of text chunks
+            Tuple of (processed_texts, valid_indices, processing_stats)
         """
-        estimated_tokens = self.estimate_tokens(text)
+        processing_start = datetime.now()
         
-        if estimated_tokens <= max_input_tokens:
-            return [text]
+        logging.info("Processing %d texts for training", len(texts))
         
-        # Split into sentences first
-        sentences = text.split('. ')
-        chunks = []
-        current_chunk = ""
-        current_tokens = 0
-        
-        for sentence in sentences:
-            sentence_tokens = self.estimate_tokens(sentence)
+        try:
+            # Stage 1: Clean and filter texts
+            cleaned_texts, valid_indices = self._clean_and_filter_texts(texts)
             
-            if current_tokens + sentence_tokens > max_input_tokens and current_chunk:
-                chunks.append(current_chunk.strip())
-                current_chunk = sentence + ". "
-                current_tokens = sentence_tokens
+            if len(cleaned_texts) == 0:
+                logging.warning("No valid texts after cleaning")
+                return pd.Series([]), [], {"status": "failed", "reason": "no_valid_texts"}
+            
+            # Stage 2: Summarize texts if enabled
+            if self.text_config["enable_summarization"]:
+                summarized_texts = await self._summarize_texts_batch(cleaned_texts, batch_size)
+                processed_texts = pd.Series(summarized_texts, name='processed_text')
             else:
-                current_chunk += sentence + ". "
-                current_tokens += sentence_tokens
-        
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-        
-        return chunks
+                processed_texts = pd.Series(cleaned_texts, name='processed_text')
+            
+            # Update statistics
+            processing_duration = datetime.now() - processing_start
+            self.processing_stats["texts_processed"] += len(processed_texts)
+            self.processing_stats["total_processing_time"] += processing_duration.total_seconds()
+            
+            stats = {
+                "status": "success",
+                "original_texts": len(texts),
+                "cleaned_texts": len(cleaned_texts),
+                "final_processed_texts": len(processed_texts),
+                "valid_indices_count": len(valid_indices),
+                "summarization_enabled": self.text_config["enable_summarization"],
+                "processing_duration_seconds": processing_duration.total_seconds()
+            }
+            
+            logging.info("Text processing completed: %d processed texts from %d original",
+                        len(processed_texts), len(texts))
+            
+            return processed_texts, valid_indices, stats
+            
+        except Exception as e:
+            processing_duration = datetime.now() - processing_start
+            logging.error("Text processing failed: %s", str(e))
+            
+            stats = {
+                "status": "failed",
+                "error": str(e),
+                "processing_duration_seconds": processing_duration.total_seconds()
+            }
+            
+            return pd.Series([]), [], stats
     
-    def summarize_text_chunks(self, chunks: List[str], short_desc: str, business_service: str) -> str:
+    async def process_texts_for_prediction(self, texts: List[str]) -> Tuple[pd.Series, List[int], Dict]:
         """
-        Summarize multiple text chunks and combine them.
+        Process texts for real-time prediction (optimized for speed).
         
         Args:
-            chunks: List of text chunks to summarize
-            short_desc: Short description
-            business_service: Business service
+            texts: List of texts to process
             
         Returns:
-            Combined summary
+            Tuple of (processed_texts, valid_indices, processing_stats)
         """
-        chunk_summaries = []
+        processing_start = datetime.now()
         
-        for i, chunk in enumerate(chunks):
-            prompt = f"""Create a concise summary (max 50 words) of this IT incident part {i+1}/{len(chunks)}:
-
-SHORT DESCRIPTION: {short_desc}
-BUSINESS SERVICE: {business_service}
-TEXT CHUNK: {chunk}
-
-Focus on: 1) the specific technical issue and 2) key error messages or symptoms.
-"""
+        try:
+            # Clean texts (faster version)
+            cleaned_texts, valid_indices = self._clean_and_filter_texts(texts, fast_mode=True)
+            
+            if len(cleaned_texts) == 0:
+                return pd.Series([]), [], {"status": "failed", "reason": "no_valid_texts"}
+            
+            # For prediction, use lighter summarization or skip it for speed
+            if self.text_config["enable_summarization"] and len(cleaned_texts) <= 5:
+                # Only summarize small batches for prediction
+                summarized_texts = await self._summarize_texts_batch(cleaned_texts, batch_size=5)
+                processed_texts = pd.Series(summarized_texts, name='processed_text')
+            else:
+                # Skip summarization for larger batches to maintain speed
+                processed_texts = pd.Series(cleaned_texts, name='processed_text')
+            
+            processing_duration = datetime.now() - processing_start
+            
+            stats = {
+                "status": "success",
+                "texts_processed": len(processed_texts),
+                "processing_duration_seconds": processing_duration.total_seconds(),
+                "summarization_applied": self.text_config["enable_summarization"] and len(cleaned_texts) <= 5
+            }
+            
+            return processed_texts, valid_indices, stats
+            
+        except Exception as e:
+            processing_duration = datetime.now() - processing_start
+            logging.error("Prediction text processing failed: %s", str(e))
+            
+            return pd.Series([]), [], {
+                "status": "failed", 
+                "error": str(e),
+                "processing_duration_seconds": processing_duration.total_seconds()
+            }
+    
+    def _clean_and_filter_texts(self, texts: List[str], fast_mode: bool = False) -> Tuple[List[str], List[int]]:
+        """Clean and filter texts"""
+        cleaned_texts = []
+        valid_indices = []
+        
+        for i, text in enumerate(texts):
+            if not isinstance(text, str):
+                continue
+            
+            # Basic cleaning
+            cleaned = text.strip()
+            
+            if not fast_mode and self.text_config["clean_text"]:
+                cleaned = self._deep_clean_text(cleaned)
+            elif fast_mode:
+                cleaned = self._fast_clean_text(cleaned)
+            
+            # Filter by minimum length
+            if len(cleaned) >= self.text_config["min_text_length"]:
+                # Truncate if too long
+                max_length = self.text_config["max_input_length"]
+                if len(cleaned) > max_length:
+                    cleaned = cleaned[:max_length] + "..."
+                
+                cleaned_texts.append(cleaned)
+                valid_indices.append(i)
+                self.processing_stats["texts_cleaned"] += 1
+        
+        logging.debug("Cleaned %d texts from %d original", len(cleaned_texts), len(texts))
+        return cleaned_texts, valid_indices
+    
+    def _deep_clean_text(self, text: str) -> str:
+        """Comprehensive text cleaning"""
+        # Remove URLs
+        if self.text_config["remove_urls"]:
+            text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+        
+        # Remove email addresses
+        if self.text_config["remove_emails"]:
+            text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '', text)
+        
+        # Normalize whitespace
+        if self.text_config["normalize_whitespace"]:
+            text = re.sub(r'\s+', ' ', text)
+        
+        # Remove special characters (keep basic punctuation)
+        text = re.sub(r'[^\w\s.,!?;:-]', ' ', text)
+        
+        # Remove excessive punctuation
+        text = re.sub(r'[.!?]{3,}', '...', text)
+        
+        return text.strip()
+    
+    def _fast_clean_text(self, text: str) -> str:
+        """Fast text cleaning for prediction"""
+        # Basic whitespace normalization only
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
+    
+    async def _summarize_texts_batch(self, texts: List[str], batch_size: int) -> List[str]:
+        """Summarize texts in batches using Azure OpenAI"""
+        summarized_texts = []
+        
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i:i+batch_size]
+            batch_start_idx = i
             
             try:
-                response = self.openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "You are a technical IT summarizer. Create precise, concise summaries."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.1,
-                    max_tokens=100,
-                    timeout=30
-                )
-                
-                chunk_summary = response.choices[0].message.content.strip().strip('"\'')
-                chunk_summaries.append(chunk_summary)
+                batch_summaries = await self._summarize_batch(batch_texts, batch_start_idx)
+                summarized_texts.extend(batch_summaries)
                 
             except Exception as e:
-                logging.error(f"Failed to summarize chunk {i+1}: {e}")
-                raise  # Re-raise to fail the entire summarization
+                logging.error("Batch summarization failed for batch %d: %s", 
+                            batch_start_idx // batch_size, str(e))
+                # Fallback to original texts for failed batch
+                summarized_texts.extend(batch_texts)
+                self.processing_stats["summarization_failures"] += len(batch_texts)
         
-        # Combine chunk summaries
-        if len(chunk_summaries) == 1:
-            return f"{chunk_summaries[0]} - {business_service}"
-        else:
-            combined = " ".join(chunk_summaries)
-            return f"{combined} - {business_service}"
+        return summarized_texts
     
-    def summarize_incident_with_llm(self, short_desc: str, desc: str, business_service: str, incident_number: str = None) -> str:
-        """
-        Summarize incident with chunking strategy for long texts.
+    async def _summarize_batch(self, texts: List[str], batch_start_idx: int) -> List[str]:
+        """Summarize a single batch of texts"""
+        summaries = []
         
-        Args:
-            short_desc: Short description
-            desc: Full description  
-            business_service: Business service
-            incident_number: Incident number for error tracking
-            
-        Returns:
-            Summary text
-            
-        Raises:
-            Exception: If summarization fails (no fallbacks)
-        """
-        # Estimate total tokens needed
-        combined_text = f"{short_desc} {desc} {business_service}"
-        input_tokens = self.estimate_tokens(combined_text)
-        max_output_tokens = 100
-        
-        # Check if we need chunking (leaving buffer for prompt and response)
-        if input_tokens + max_output_tokens > 120000:  # Conservative limit for 128k context
-            logging.info(f"Text too long ({input_tokens} tokens), using chunking strategy for incident {incident_number}")
-            
-            # Chunk the description text
-            chunks = self.chunk_text_for_summarization(desc, max_input_tokens=100000)
-            return self.summarize_text_chunks(chunks, short_desc, business_service)
-        
-        # Standard single-call summarization
-        prompt = f"""Create a single concise sentence (max 30 words) summarizing this IT incident.
-Focus on: 1) the specific platform/application affected and 2) the exact issue or error.
-
-SHORT DESCRIPTION: {short_desc}
-DESCRIPTION: {desc}
-AFFECTED SYSTEM: {business_service}
-
-Your summary MUST:
-1. Begin by clearly identifying the affected platform/application
-2. Describe the specific technical issue (not working, error, failure, etc.)
-3. Capture any key error messages or symptoms mentioned
-4. Be technical but clear and concise (one sentence only)
-"""
-        
-        response = self.openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a technical IT incident summarizer that creates precise, concise summaries focusing on affected systems and specific issues."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=100,
-            timeout=30
-        )
-        
-        summary = response.choices[0].message.content.strip().strip('"\'')
-        
-        # Ensure business service is included
-        if business_service and business_service.lower() not in summary.lower():
-            summary = f"{summary} - {business_service}"
-        
-        return summary
-      def process_incident_for_embedding_batch(self, df: pd.DataFrame, batch_size: int = 10) -> Tuple[pd.Series, Dict]:
-        """
-        Process incidents for embedding with strict no-fallback policy.
-        
-        Args:
-            df: DataFrame with incidents
-            batch_size: Batch size for processing
-            
-        Returns:
-            Tuple of (result_series, statistics)
-        """
-        logging.info(f"Starting summarization pipeline: {len(df)} incidents, batch_size={batch_size}")
-        
-        # Reset failure tracking
-        self.failed_incidents.clear()
-        self.failure_reasons.clear()
-        
-        result_series = pd.Series(index=df.index, dtype=object)
-        successful_count = 0
-        total_batches = (len(df) + batch_size - 1) // batch_size
-        
-        # Process in batches
-        with tqdm(total=len(df), desc="Summarizing incidents") as pbar:
-            for batch_num in range(0, len(df), batch_size):
-                batch_df = df.iloc[batch_num:batch_num+batch_size]
-                current_batch = (batch_num // batch_size) + 1
+        for i, text in enumerate(texts):
+            try:
+                summary = await self._summarize_single_text(text)
+                summaries.append(summary)
+                self.processing_stats["texts_summarized"] += 1
                 
-                batch_start_time = time.time()
-                batch_successes = 0
-                batch_failures = 0
-                batch_failed_incidents = []
+            except Exception as e:
+                logging.warning("Summarization failed for text %d: %s", 
+                              batch_start_idx + i, str(e))
+                # Fallback to original text
+                summaries.append(text)
+                self.processing_stats["summarization_failures"] += 1
+        
+        return summaries
+    
+    async def _summarize_single_text(self, text: str) -> str:
+        """Summarize a single text using Azure OpenAI"""
+        for attempt in range(self.max_retries):
+            try:
+                prompt = self._build_summarization_prompt(text)
                 
-                logging.info(f"Processing batch {current_batch}/{total_batches} - incidents {batch_num+1} to {min(batch_num+batch_size, len(df))}")
+                response = await self.client.chat.completions.create(
+                    model=self.summarization_model,
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant that summarizes incident reports concisely."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=self.text_config["max_summary_length"],
+                    temperature=0.3
+                )
                 
-                for idx, row in batch_df.iterrows():
-                    incident_number = row.get('number', f'unknown_{idx}')
+                summary = response.choices[0].message.content.strip()
+                
+                # Validate summary
+                if len(summary) > 0 and summary != text:
+                    return summary
+                else:
+                    logging.warning("Invalid summary generated, using original text")
+                    return text
                     
-                    try:
-                        # Get and clean text fields
-                        short_desc = self._get_safe_text(row, 'short_description')
-                        desc = self._get_safe_text(row, 'description')
-                        business_svc = self._get_safe_text(row, 'business_service')
-                        
-                        # Log text length for debugging
-                        text_length = len(f"{short_desc} {desc}")
-                        estimated_tokens = self.estimate_tokens(f"{short_desc} {desc} {business_svc}")
-                        
-                        logging.debug(f"Processing {incident_number}: {text_length} chars, ~{estimated_tokens} tokens")
-                        
-                        # Clean texts
-                        short_desc = self._clean_text_for_summary(short_desc)
-                        desc = self._clean_text_for_summary(desc)
-                        business_svc = self._normalize_business_service(business_svc)
-                        
-                        # Skip if essential fields are missing
-                        if not short_desc and not desc:
-                            raise ValueError("No description content available")
-                        
-                        # Call summarization (will raise exception if it fails)
-                        summary = self.summarize_incident_with_llm(
-                            short_desc, desc, business_svc, incident_number
-                        )
-                        
-                        result_series[idx] = summary
-                        successful_count += 1
-                        batch_successes += 1
-                        
-                        logging.debug(f"✓ {incident_number}: Successfully summarized")
-                        
-                    except Exception as e:
-                        # Track failure but don't create fallback
-                        error_msg = str(e)
-                        self.failed_incidents.add(incident_number)
-                        self.failure_reasons[incident_number] = error_msg
-                        batch_failures += 1
-                        batch_failed_incidents.append(incident_number)
-                        
-                        # Classify error type for better logging
-                        error_type = self._classify_error(error_msg)
-                        logging.warning(f"✗ {incident_number}: {error_type} - {error_msg}")
-                        
-                    pbar.update(1)
+            except openai.RateLimitError as e:
+                wait_time = self.retry_delay * (2 ** attempt)
+                logging.warning("Rate limit hit, waiting %.1f seconds", wait_time)
+                await asyncio.sleep(wait_time)
                 
-                # Log batch completion summary
-                batch_duration = time.time() - batch_start_time
-                batch_success_rate = (batch_successes / len(batch_df)) * 100 if len(batch_df) > 0 else 0
-                
-                logging.info(f"Batch {current_batch} complete: {batch_successes}/{len(batch_df)} successful "
-                           f"({batch_success_rate:.1f}%) in {batch_duration:.1f}s")
-                
-                if batch_failed_incidents:
-                    logging.warning(f"Batch {current_batch} failures: {batch_failed_incidents}")
-                
-                # Add small delay between batches to avoid rate limits
-                if current_batch < total_batches:
-                    time.sleep(0.5)
-          # Filter out failed incidents (NaN values)
-        result_series = result_series.dropna()
+            except openai.APIError as e:
+                logging.error("API error during summarization: %s", str(e))
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay)
+                else:
+                    raise
+                    
+            except Exception as e:
+                logging.error("Unexpected error during summarization: %s", str(e))
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay)
+                else:
+                    raise
         
-        # Create detailed statistics with failure breakdown
-        failure_breakdown = {}
-        for reason in ["RATE_LIMIT", "TIMEOUT", "TOKEN_LIMIT", "AUTH_ERROR", "CONNECTION_ERROR", "SERVICE_UNAVAILABLE", "API_ERROR"]:
-            count = len([k for k, v in self.failure_reasons.items() if reason in self._classify_error(v)])
-            if count > 0:
-                failure_breakdown[reason] = count
-        
-        # Create statistics
-        stats = {
-            "total_incidents": len(df),
-            "successful_summarizations": successful_count,
-            "failed_incidents": len(self.failed_incidents),
-            "success_rate": (successful_count / len(df)) * 100 if len(df) > 0 else 0,
-            "failed_incident_numbers": list(self.failed_incidents),
-            "failure_breakdown": failure_breakdown,
-            "failure_reasons": dict(self.failure_reasons)
-        }
-        
-        logging.info("Summarization complete: %d/%d successful (%.1f%%)", 
-                    successful_count, len(df), stats['success_rate'])
-        
-        if self.failed_incidents:
-            logging.warning("Failed incidents: %s", sorted(list(self.failed_incidents)))
-            logging.info("Failure breakdown:")
-            for error_type, count in failure_breakdown.items():
-                logging.info("  - %s: %d incidents", error_type, count)
-        
-        return result_series, stats
+        # If all retries failed, return original text
+        logging.error("All summarization attempts failed, returning original text")
+        return text
     
-    def _get_safe_text(self, row, column: str) -> str:
-        """Safely extract text from DataFrame row"""
-        value = row.get(column, '')
-        return str(value) if pd.notna(value) else ""
+    def _build_summarization_prompt(self, text: str) -> str:
+        """Build summarization prompt for Azure OpenAI"""
+        max_summary_length = self.text_config["max_summary_length"]
+        
+        prompt = f"""
+        Please summarize the following incident report in {max_summary_length} characters or less. 
+        Focus on the key technical issues, symptoms, and resolution steps.
+        Keep the summary concise but informative for clustering purposes.
+        
+        Incident Report:
+        {text}
+        
+        Summary:
+        """
+        
+        return prompt.strip()
     
-    def _clean_text_for_summary(self, text: str) -> str:
-        """Clean text for summarization"""
-        if not text:
-            return ""
+    def get_processing_statistics(self) -> Dict[str, Any]:
+        """Get text processing statistics"""
+        stats = self.processing_stats.copy()
         
-        # Replace newlines and tabs with spaces
-        text = re.sub(r'[\n\r\t]+', ' ', text)
-        # Replace multiple spaces with single space
-        text = re.sub(r'\s+', ' ', text)
-        # Remove email addresses for privacy
-        text = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '[EMAIL]', text)
-        # Remove non-printable characters
-        text = ''.join(c for c in text if c.isprintable() or c.isspace())
-        
-        return text.strip()
-    
-    def _normalize_business_service(self, text: str) -> str:
-        """Normalize business service names"""
-        if not text:
-            return ""
-        
-        # Remove environment suffixes
-        text = re.sub(r'\s*[-_]\s*(PROD|DEV|TEST|UAT|QA)$', '', text)
-        # Replace dashes and underscores with spaces
-        text = re.sub(r'[-_]+', ' ', text)
-        # Normalize whitespace
-        text = re.sub(r'\s+', ' ', text)
-        
-        return text.strip()
-    
-    def _classify_error(self, error_msg: str) -> str:
-        """Classify error types for better logging"""
-        error_msg_lower = error_msg.lower()
-        
-        if "rate limit" in error_msg_lower or "429" in error_msg_lower:
-            return "RATE_LIMIT"
-        elif "timeout" in error_msg_lower:
-            return "TIMEOUT"
-        elif "context length" in error_msg_lower or "token" in error_msg_lower:
-            return "TOKEN_LIMIT"
-        elif "authentication" in error_msg_lower or "401" in error_msg_lower:
-            return "AUTH_ERROR"
-        elif "connection" in error_msg_lower:
-            return "CONNECTION_ERROR"
-        elif "service unavailable" in error_msg_lower or "503" in error_msg_lower:
-            return "SERVICE_UNAVAILABLE"
+        # Calculate derived metrics
+        if stats["texts_processed"] > 0:
+            stats["cleaning_success_rate"] = (stats["texts_cleaned"] / stats["texts_processed"]) * 100
+            
+        if stats["texts_summarized"] + stats["summarization_failures"] > 0:
+            stats["summarization_success_rate"] = (
+                stats["texts_summarized"] / 
+                (stats["texts_summarized"] + stats["summarization_failures"]) * 100
+            )
         else:
-            return "API_ERROR"
+            stats["summarization_success_rate"] = 0
+        
+        return stats
     
-    def get_failed_incidents_report(self) -> Dict:
-        """Get a report of failed incidents for troubleshooting"""
-        return {
-            "failed_incident_count": len(self.failed_incidents),
-            "failed_incident_numbers": sorted(list(self.failed_incidents)),
-            "failure_reasons_summary": {
-                reason: len([k for k, v in self.failure_reasons.items() if reason in v])
-                for reason in ["rate limit", "token", "timeout", "context length", "api"]
-            },
-            "detailed_failures": dict(self.failure_reasons)
+    def validate_configuration(self) -> Dict[str, Any]:
+        """Validate text processing configuration"""
+        validation_results = {
+            "valid": True,
+            "warnings": [],
+            "errors": []
         }
+        
+        # Check Azure OpenAI configuration if summarization is enabled
+        if self.text_config["enable_summarization"]:
+            azure_config = self.config.azure.openai
+            
+            if not azure_config.get('endpoint'):
+                validation_results["errors"].append("Azure OpenAI endpoint required for summarization")
+                validation_results["valid"] = False
+            
+            if not azure_config.get('api_key'):
+                validation_results["errors"].append("Azure OpenAI API key required for summarization")
+                validation_results["valid"] = False
+            
+            if not azure_config.get('summarization_model'):
+                validation_results["warnings"].append("Summarization model not specified, using default")
+        
+        # Check configuration values
+        if self.text_config["min_text_length"] <= 0:
+            validation_results["errors"].append("Minimum text length must be positive")
+            validation_results["valid"] = False
+        
+        if self.text_config["max_input_length"] <= self.text_config["min_text_length"]:
+            validation_results["errors"].append("Maximum input length must be greater than minimum")
+            validation_results["valid"] = False
+        
+        return validation_results
+    
+    def reset_statistics(self):
+        """Reset processing statistics"""
+        self.processing_stats = {
+            "texts_processed": 0,
+            "texts_cleaned": 0,
+            "texts_summarized": 0,
+            "summarization_failures": 0,
+            "total_processing_time": 0
+        }
+        logging.info("Text processor statistics reset")

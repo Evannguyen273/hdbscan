@@ -1,4 +1,5 @@
-# filepath: c:\Users\Bachn\OneDrive\Desktop\my_projects\hdbscan\preprocessing\orchestrator.py
+# preprocessing/orchestrator.py
+# Updated for new config structure and cumulative training approach
 import logging
 import pandas as pd
 import numpy as np
@@ -7,14 +8,16 @@ from datetime import datetime
 
 from .text_processing import TextProcessor
 from .embedding_processor import EmbeddingProcessor
+from config.config import get_config
 
 class PreprocessingOrchestrator:
     """Orchestrates the complete preprocessing pipeline with comprehensive error tracking"""
     
-    def __init__(self, config):
-        self.config = config
-        self.text_processor = TextProcessor(config)
-        self.embedding_processor = EmbeddingProcessor(config)
+    def __init__(self, config=None):
+        """Initialize preprocessing orchestrator with updated config system"""
+        self.config = config if config is not None else get_config()
+        self.text_processor = TextProcessor(self.config)
+        self.embedding_processor = EmbeddingProcessor(self.config)
         
         # Track pipeline statistics
         self.pipeline_stats = {}
