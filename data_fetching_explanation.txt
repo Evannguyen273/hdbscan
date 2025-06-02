@@ -1,0 +1,155 @@
+DATA FETCHING STEP EXPLANATION
+================================================================================
+
+WHAT IS THIS STEP?
+================================================================================
+
+The commented section in training_example.py:
+
+    # TODO: Replace with real data fetch from BigQuery
+    # In real implementation, you would fetch 2024 data like this:
+    # from data_access.bigquery_client import BigQueryClient
+    # bigquery_client = BigQueryClient(config)
+    # raw_data = bigquery_client.fetch_incidents_by_tech_center_and_year(tech_center, 2024)
+    # preprocessing_data = await preprocessing_pipeline.process_for_training(raw_data)
+    
+    # For now, create sample data
+    sample_data = create_sample_preprocessing_data()
+
+This is the bridge between your pipeline and actual incident data.
+
+CURRENT STATE (Testing Mode):
+================================================================================
+
+sample_data = create_sample_preprocessing_data()
+
+- Creates fake incident data for testing the pipeline
+- 100 sample incidents with realistic patterns (SharePoint, email, database issues)
+- Pre-generated embeddings (1536 dimensions like OpenAI)
+- Allows testing without real BigQuery data
+
+FUTURE STATE (Production Mode):
+================================================================================
+
+from data_access.bigquery_client import BigQueryClient
+bigquery_client = BigQueryClient(config)
+raw_data = bigquery_client.fetch_incidents_by_tech_center_and_year(tech_center, 2024)
+preprocessing_data = await preprocessing_pipeline.process_for_training(raw_data)
+
+WHAT THIS STEP DOES IN PRODUCTION:
+================================================================================
+
+1. DATA FETCHING:
+   raw_data = bigquery_client.fetch_incidents_by_tech_center_and_year(tech_center, 2024)
+   
+   - Connects to BigQuery using your configured credentials
+   - Fetches all incidents for the specified tech center for 2024
+   - Returns raw incident data: descriptions, short descriptions, business services, etc.
+
+2. DATA PROCESSING:
+   preprocessing_data = await preprocessing_pipeline.process_for_training(raw_data)
+   
+   - Runs text summarization using Azure OpenAI
+   - Generates embeddings using Azure OpenAI embedding model
+   - Handles errors and retries for API failures
+   - Returns processed data ready for clustering
+
+DATA FLOW:
+================================================================================
+
+BigQuery (2024 incidents) 
+    ↓
+Raw incident text data
+    ↓
+Text Processing (Azure OpenAI summarization)
+    ↓
+Embedding Generation (Azure OpenAI embeddings)
+    ↓
+Processed data ready for HDBSCAN clustering
+
+TO ENABLE REAL DATA:
+================================================================================
+
+Step 1: Implement BigQuery Client Method
+----------------------------------------
+
+Add this method to your BigQueryClient (data_access/bigquery_client.py):
+
+async def fetch_incidents_by_tech_center_and_year(self, tech_center: str, year: int) -> pd.DataFrame:
+    """Fetch incidents for specific tech center and year"""
+    query = f"""
+    SELECT 
+        incident_id,
+        short_description,
+        description,
+        business_service,
+        tech_center,
+        created_date
+    FROM `{self.config.bigquery.incident_table}`
+    WHERE tech_center = @tech_center
+    AND EXTRACT(YEAR FROM created_date) = @year
+    ORDER BY created_date DESC
+    """
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("tech_center", "STRING", tech_center),
+            bigquery.ScalarQueryParameter("year", "INT64", year)
+        ]
+    )
+    
+    return self.client.query(query, job_config=job_config).to_dataframe()
+
+Step 2: Update Training Example
+-------------------------------
+
+Replace the TODO section with:
+
+from data_access.bigquery_client import BigQueryClient
+from pipeline.preprocessing_pipeline import PreprocessingPipeline
+
+bigquery_client = BigQueryClient(config)
+preprocessing_pipeline = PreprocessingPipeline(config)
+
+# Fetch real 2024 data
+raw_data = await bigquery_client.fetch_incidents_by_tech_center_and_year(tech_center, 2024)
+preprocessing_data = await preprocessing_pipeline.process_for_training(raw_data)
+
+WHY THIS DESIGN:
+================================================================================
+
+1. TESTABLE: Sample data allows testing without BigQuery setup
+2. CONFIGURABLE: Easy to switch between test and production mode
+3. SCALABLE: Real implementation handles large datasets with proper preprocessing
+4. ROBUST: Includes error handling, rate limiting, and retry logic
+
+CURRENT STATUS:
+================================================================================
+
+Right now you're in "testing mode" with sample data. 
+
+When ready for production:
+1. Uncomment the real data fetching code
+2. Implement the BigQuery client method
+3. Comment out the sample data line
+
+The pipeline will then:
+- Fetch real incident data from BigQuery
+- Process it through Azure OpenAI (summarization + embeddings)
+- Run HDBSCAN clustering on the processed data
+- Store results in Azure Blob Storage and BigQuery registry
+
+EXAMPLE REAL DATA FLOW:
+================================================================================
+
+Input:  BigQuery table with 1,247 incidents for "BT-TC-Network Operations" in 2024
+        ↓
+        Text summarization (Azure OpenAI): 1,247 summaries
+        ↓ 
+        Embedding generation (Azure OpenAI): 1,189 embeddings (95.3% success rate)
+        ↓
+        HDBSCAN clustering: 8 clusters identified
+        ↓
+Output: Trained model stored in Azure Blob + BigQuery registry updated
+
+This step is the foundation of the entire training pipeline!

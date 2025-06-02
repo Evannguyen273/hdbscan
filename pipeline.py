@@ -1,3 +1,7 @@
+# DEPRECATED: This file is replaced by pipeline/ folder structure
+# Use pipeline/orchestrator.py instead
+# TODO: Remove this file - it's legacy code not used by current architecture
+
 import logging
 import time
 import os

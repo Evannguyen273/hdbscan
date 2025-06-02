@@ -186,6 +186,83 @@ async def demonstrate_single_tech_center_training():
         print(f"\n❌ Training failed: {e}")
         return None
 
+async def run_single_tech_center_2024(tech_center_name: str = None):
+    """Run clustering for a single tech center for the year 2024"""
+    
+    print("="*80)
+    print("SINGLE TECH CENTER 2024 CLUSTERING")
+    print("="*80)
+    
+    config = get_config()
+    training_pipeline = TrainingPipeline(config)
+    
+    # Use provided tech center or first from config
+    if tech_center_name:
+        tech_center = tech_center_name
+    else:
+        tech_centers = config.tech_centers
+        if not tech_centers:
+            print("❌ No tech centers configured")
+            return None
+        tech_center = tech_centers[0]
+    
+    print(f"Training clustering model for: {tech_center}")
+    print(f"Training period: Full Year 2024")
+    
+    # TODO: Replace with real data fetch from BigQuery
+    # In real implementation, you would fetch 2024 data like this:
+    # from data_access.bigquery_client import BigQueryClient
+    # bigquery_client = BigQueryClient(config)
+    # raw_data = bigquery_client.fetch_incidents_by_tech_center_and_year(tech_center, 2024)
+    # preprocessing_data = await preprocessing_pipeline.process_for_training(raw_data)
+    
+    # For now, create sample data
+    sample_data = create_sample_preprocessing_data()
+    
+    try:
+        training_results = await training_pipeline.train_tech_center(
+            tech_center=tech_center,
+            preprocessing_data=sample_data,
+            version="2024_full_year",
+            year=2024,
+            quarter="full_year"  # Special indicator for full year
+        )
+        
+        if training_results["status"] == "success":
+            print(f"\n✅ 2024 Clustering successful for {tech_center}")
+            print(f"📊 Results:")
+            print(f"  - Training Duration: {training_results['training_duration_seconds']/60:.1f} minutes")
+            print(f"  - Incidents Processed: {training_results['incidents_trained']}")
+            print(f"  - Model Version: {training_results['version']}")
+            
+            # Show detailed clustering results
+            model_data = training_results['model_data']
+            print(f"\n🎯 Clustering Details:")
+            print(f"  - Total Models Created: {len(model_data['models'])}")
+            
+            if 'domain_info' in model_data:
+                print(f"  - Domains Processed: {len(model_data['domain_info'])}")
+                for domain, info in model_data['domain_info'].items():
+                    clusters = info.get('cluster_count', 'N/A')
+                    incidents = info.get('incident_count', 'N/A')
+                    print(f"    - {domain}: {incidents} incidents → {clusters} clusters")
+            
+            print(f"\n💾 Storage:")
+            print(f"  - Model stored in Azure Blob Storage")
+            print(f"  - Model registry updated in BigQuery")
+            print(f"  - Model ID: {training_results.get('model_id', 'N/A')}")
+            
+        else:
+            print(f"\n❌ 2024 Clustering failed for {tech_center}")
+            print(f"Error: {training_results.get('error', 'Unknown error')}")
+        
+        return training_results
+        
+    except Exception as e:
+        logging.error("2024 clustering failed for %s: %s", tech_center, e)
+        print(f"\n❌ Clustering failed: {e}")
+        return None
+
 def create_sample_preprocessing_data() -> Dict:
     """Create sample preprocessing data for demonstration"""
     
@@ -455,5 +532,41 @@ async def main():
         print(f"\n❌ Training examples failed: {e}")
 
 if __name__ == "__main__":
-    # Run async main function
-    asyncio.run(main())
+    import sys
+    
+    # Check command line arguments
+    if len(sys.argv) > 1:
+        command = sys.argv[1].lower()
+        
+        if command == "single_2024":
+            # Run single tech center for 2024
+            tech_center = sys.argv[2] if len(sys.argv) > 2 else None
+            asyncio.run(run_single_tech_center_2024(tech_center))
+            
+        elif command == "full_cycle":
+            # Run complete training cycle
+            asyncio.run(run_complete_training_cycle_example())
+            
+        elif command == "prediction":
+            # Run prediction cycle
+            asyncio.run(run_prediction_cycle_example())
+            
+        elif command == "single_tc":
+            # Run single tech center (current quarter)
+            asyncio.run(demonstrate_single_tech_center_training())
+            
+        elif command == "status":
+            # Show pipeline status
+            show_pipeline_status()
+            
+        else:
+            print("Available commands:")
+            print("  single_2024 [tech_center_name]  - Run clustering for 1 tech center for 2024")
+            print("  full_cycle                     - Run complete training cycle")
+            print("  prediction                     - Run prediction cycle")
+            print("  single_tc                      - Run single tech center (current quarter)")
+            print("  status                         - Show pipeline status")
+            print("\nExample: python training_example.py single_2024 'BT-TC-Network Operations'")
+    else:
+        # Run all examples
+        asyncio.run(main())
