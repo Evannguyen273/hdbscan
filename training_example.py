@@ -1,343 +1,224 @@
 # filepath: c:\Users\Bachn\OneDrive\Desktop\my_projects\hdbscan\training_example.py
 """
-Complete training pipeline example with comprehensive failure handling.
-Shows how to train clustering models from raw incident data with guardrails.
+Complete training pipeline example for cumulative HDBSCAN approach.
+Shows how to train clustering models using the updated pipeline architecture.
 """
 
 import pandas as pd
 import numpy as np
 import logging
+import asyncio
 from datetime import datetime
-from typing import Dict
+from typing import Dict, List
 
 # Setup logging
-from logging_setup import setup_detailed_logging
-setup_detailed_logging(logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
-# Import training components
-from training.training_orchestrator import TrainingOrchestrator
-from config import Config  # Assume you have a config module
+# Import updated pipeline components
+from pipeline.orchestrator import PipelineOrchestrator
+from pipeline.training_pipeline import TrainingPipeline
+from config.config import get_config, get_current_quarter
 
-def run_basic_training_example():
-    """Example of running the complete training pipeline"""
+async def run_complete_training_cycle_example():
+    """Example of running a complete training cycle for cumulative HDBSCAN approach"""
     
     print("="*80)
-    print("COMPLETE TRAINING PIPELINE EXAMPLE")
+    print("COMPLETE TRAINING CYCLE EXAMPLE")
     print("="*80)
+    
+    # Initialize the pipeline orchestrator
+    config = get_config()
+    orchestrator = PipelineOrchestrator(config)
+    
+    # Set training parameters
+    current_year = datetime.now().year
+    current_quarter = get_current_quarter()
+    
+    print(f"Training for: {current_year} {current_quarter}")
+    print(f"Training window: {config.training.training_window_months} months")
+    
+    # Run the complete training cycle
+    print("\nStarting complete cumulative training cycle...")
+    
+    try:
+        training_results = await orchestrator.run_training_cycle(
+            year=current_year,
+            quarter=current_quarter,
+            force_retrain=False  # Skip if model already exists
+        )
+        
+        if training_results["status"] == "success":
+            print("\n" + "="*80)
+            print("TRAINING CYCLE SUCCESSFUL!")
+            print("="*80)
+            
+            print(f"📊 Training Overview:")
+            print(f"  - Version: {training_results['version']}")
+            print(f"  - Duration: {training_results['training_duration_seconds']/60:.1f} minutes")
+            print(f"  - Models Trained: {training_results['models_trained']}")
+            print(f"  - Tech Centers: {len(training_results['tech_centers'])}")
+            
+            print(f"\n🎯 Tech Centers Processed:")
+            for tech_center in training_results['tech_centers']:
+                print(f"  - {tech_center}")
+            
+            print(f"\n💾 Storage Results:")
+            storage_results = training_results['storage_results']
+            successful_storage = sum(1 for result in storage_results.values() 
+                                   if result.get('status') == 'success')
+            print(f"  - Successfully stored: {successful_storage}/{len(storage_results)} models")
+            
+        elif training_results["status"] == "skipped":
+            print(f"\n⏭️ Training skipped: {training_results.get('reason', 'Model already exists')}")
+            
+        else:
+            print("\n" + "="*80)
+            print("TRAINING CYCLE FAILED!")
+            print("="*80)
+            print(f"❌ Error: {training_results.get('error', 'Unknown error')}")
+            print(f"Duration: {training_results.get('training_duration_seconds', 0)/60:.1f} minutes")
+        
+        return training_results
+        
+    except Exception as e:
+        logging.error("Training cycle failed: %s", e)
+        print(f"\n❌ Training cycle failed: {e}")
+        return None
+
+async def run_prediction_cycle_example():
+    """Example of running prediction cycle for real-time classification"""
+    
+    print("\n" + "="*80)
+    print("PREDICTION CYCLE EXAMPLE")
+    print("="*80)
+    
+    # Initialize the pipeline orchestrator
+    config = get_config()
+    orchestrator = PipelineOrchestrator(config)
+    
+    # Run prediction cycle for all tech centers
+    print("Starting prediction cycle for all tech centers...")
+    
+    try:
+        prediction_results = await orchestrator.run_prediction_cycle()
+        
+        if prediction_results["status"] == "success":
+            print("\n✅ Prediction cycle successful!")
+            print(f"📊 Results:")
+            print(f"  - Duration: {prediction_results['prediction_duration_seconds']:.1f} seconds")
+            print(f"  - Incidents Processed: {prediction_results['incidents_processed']}")
+            print(f"  - Tech Centers: {prediction_results['tech_centers_processed']}")
+            print(f"  - Predictions Stored: {prediction_results['predictions_stored']}")
+            
+        else:
+            print(f"\n❌ Prediction cycle failed: {prediction_results.get('error', 'Unknown error')}")
+        
+        return prediction_results
+        
+    except Exception as e:
+        logging.error("Prediction cycle failed: %s", e)
+        print(f"\n❌ Prediction cycle failed: {e}")
+        return None
+
+async def demonstrate_single_tech_center_training():
+    """Demonstrate training for a single tech center"""
+    
+    print("\n" + "="*80)
+    print("SINGLE TECH CENTER TRAINING EXAMPLE")
+    print("="*80)
+    
+    config = get_config()
+    training_pipeline = TrainingPipeline(config)
+    
+    # Get first tech center from config
+    tech_centers = config.tech_centers
+    if not tech_centers:
+        print("❌ No tech centers configured")
+        return None
+    
+    tech_center = tech_centers[0]
+    print(f"Training model for: {tech_center}")
+    
+    # Create sample preprocessing data (in real scenario, this comes from preprocessing pipeline)
+    sample_data = create_sample_preprocessing_data()
+    
+    # Set version info
+    current_year = datetime.now().year
+    current_quarter = get_current_quarter()
+    version = f"{current_year}_{current_quarter}"
+    
+    try:
+        training_results = await training_pipeline.train_tech_center(
+            tech_center=tech_center,
+            preprocessing_data=sample_data,
+            version=version,
+            year=current_year,
+            quarter=current_quarter
+        )
+        
+        if training_results["status"] == "success":
+            print(f"\n✅ Training successful for {tech_center}")
+            print(f"📊 Results:")
+            print(f"  - Duration: {training_results['training_duration_seconds']/60:.1f} minutes")
+            print(f"  - Incidents Trained: {training_results['incidents_trained']}")
+            print(f"  - Model Version: {training_results['version']}")
+            
+            # Show model details
+            model_data = training_results['model_data']
+            print(f"\n🎯 Model Details:")
+            print(f"  - Models Created: {len(model_data['models'])}")
+            print(f"  - Domain Count: {len(model_data.get('domain_info', {}))}")
+            
+            for domain, info in model_data.get('domain_info', {}).items():
+                print(f"    - {domain}: {info['incident_count']} incidents, {info['cluster_count']} clusters")
+            
+        else:
+            print(f"\n❌ Training failed for {tech_center}: {training_results.get('error', 'Unknown error')}")
+        
+        return training_results
+        
+    except Exception as e:
+        logging.error("Single tech center training failed: %s", e)
+        print(f"\n❌ Training failed: {e}")
+        return None
+
+def create_sample_preprocessing_data() -> Dict:
+    """Create sample preprocessing data for demonstration"""
     
     # Create sample incident data
-    sample_data = create_sample_incident_data(size=200)  # Larger dataset for clustering
-    df = pd.DataFrame(sample_data)
-    
-    print(f"Input data: {len(df)} incidents")
-    
-    # Initialize the training orchestrator
-    config = Config()  # Your configuration
-    orchestrator = TrainingOrchestrator(config)
-    
-    # Configure the pipeline
-    preprocessing_config = {
-        "summarization_batch_size": 25,
-        "embedding_batch_size": 50,
-        "use_batch_embedding_api": True
-    }
-      training_config = {
-        "hdbscan_params": {
-            "min_cluster_size": 8,  # Reduced for smaller datasets
-            "min_samples": 3,       # Reduced for smaller datasets
-            "cluster_selection_epsilon": 0.0,
-            "metric": "euclidean"
-        },
-        "fallback_params_list": [
-            {"min_cluster_size": 6, "min_samples": 2, "metric": "euclidean"},
-            {"min_cluster_size": 4, "min_samples": 1, "metric": "cosine"},
-            {"min_cluster_size": 3, "min_samples": 1, "metric": "euclidean"}
+    incident_data = pd.DataFrame({
+        'incident_id': [f'INC{i:07d}' for i in range(1000, 1100)],
+        'short_description': [
+            'SharePoint site not loading' if i % 10 == 0 
+            else f'Application error {i}' for i in range(100)
         ],
-        "preprocessing_config": {
-            "apply_scaling": True, 
-            "apply_pca": False
-        },
-        "output_dir": "models/basic_training"
+        'description': [
+            'Users cannot access SharePoint site. Getting timeout errors.' * (2 if i % 15 == 0 else 1)
+            for i in range(100)
+        ],
+        'business_service': [
+            'SharePoint Online' if i % 5 == 0 
+            else f'Service {i%3}' for i in range(100)
+        ]
+    })
+    
+    # Create sample embeddings (1536 dimensions like OpenAI)
+    np.random.seed(42)  # For reproducible results
+    embeddings = np.random.normal(0, 1, (100, 1536)).astype(np.float32)
+    
+    # Add some clustering structure
+    for i in range(0, 100, 20):
+        cluster_center = np.random.normal(0, 2, 1536)
+        embeddings[i:i+20] += cluster_center * 0.5
+    
+    return {
+        'embeddings': embeddings,
+        'incident_data': incident_data
     }
-    
-    # Run the complete training pipeline
-    print("\nStarting complete training pipeline...")
-    
-    try:
-        success, results = orchestrator.run_end_to_end_training(
-            df=df,
-            preprocessing_config=preprocessing_config,
-            training_config=training_config,
-            save_intermediate_results=True
-        )
-        
-        if success:
-            print("\n" + "="*80)
-            print("TRAINING SUCCESSFUL!")
-            print("="*80)
-            
-            stats = results["pipeline_stats"]
-            
-            print(f"📊 Pipeline Overview:")
-            print(f"  - Duration: {stats['pipeline_overview']['total_duration_minutes']:.1f} minutes")
-            print(f"  - Success Rate: {stats['pipeline_overview']['pipeline_success_rate']:.1f}%")
-            print(f"  - Incidents Clustered: {stats['data_flow']['incidents_in_clusters']}/{stats['pipeline_overview']['original_incidents']}")
-            
-            print(f"\n🎯 Clustering Results:")
-            print(f"  - Clusters Found: {stats['clustering_results']['clusters_found']}")
-            print(f"  - Noise Points: {stats['data_flow']['noise_incidents']}")
-            print(f"  - Quality Acceptable: {'✅' if stats['clustering_results']['cluster_quality_acceptable'] else '⚠️'}")
-            
-            if stats['clustering_results']['silhouette_score'] != "N/A":
-                print(f"  - Silhouette Score: {stats['clustering_results']['silhouette_score']:.3f}")
-            
-            # Show failure breakdown if any
-            failure_analysis = stats['failure_analysis']
-            total_failures = (failure_analysis['summarization_failures'] + 
-                             failure_analysis['embedding_failures'])
-            
-            if total_failures > 0:
-                print(f"\n⚠️ Failure Analysis:")
-                print(f"  - Summarization Failures: {failure_analysis['summarization_failures']}")
-                print(f"  - Embedding Failures: {failure_analysis['embedding_failures']}")
-                print(f"  - Training Warnings: {failure_analysis['training_warnings']}")
-            
-            # Get training artifacts
-            artifacts = orchestrator.get_training_artifacts()
-            if artifacts:
-                print(f"\n🔧 Training Artifacts Available:")
-                print(f"  - Trained Model: ✅")
-                print(f"  - Cluster Labels: ✅ ({len(artifacts['cluster_labels'])} labels)")
-                print(f"  - Training Stats: ✅")
-            
-        else:
-            print("\n" + "="*80)
-            print("TRAINING FAILED!")
-            print("="*80)
-            
-            print(f"❌ Critical Failures:")
-            for failure in results["critical_failures"]:
-                print(f"  - {failure}")
-            
-            if results.get("warnings"):
-                print(f"\n⚠️ Warnings:")
-                for warning in results["warnings"]:
-                    print(f"  - {warning}")
-        
-        return success, results
-        
-    except Exception as e:
-        logging.error("Training pipeline failed: %s", e)
-        print(f"\n❌ Training pipeline failed: {e}")
-        return False, None
-
-def demonstrate_parameter_search():
-    """Demonstrate parameter search for optimal clustering"""
-    
-    print("\n" + "="*80)
-    print("PARAMETER SEARCH EXAMPLE")
-    print("="*80)
-    
-    # Create sample data
-    sample_data = create_sample_incident_data(size=150)
-    df = pd.DataFrame(sample_data)
-    
-    # Define parameter grid to search
-    parameter_grid = [
-        {"min_cluster_size": 15, "min_samples": 5, "metric": "euclidean"},
-        {"min_cluster_size": 10, "min_samples": 3, "metric": "euclidean"},
-        {"min_cluster_size": 12, "min_samples": 4, "metric": "cosine"},
-        {"min_cluster_size": 8, "min_samples": 2, "metric": "euclidean"},
-    ]
-    
-    config = Config()
-    orchestrator = TrainingOrchestrator(config)
-    
-    print(f"Testing {len(parameter_grid)} parameter combinations...")
-    
-    try:
-        success, results = orchestrator.run_training_with_parameter_search(
-            df=df,
-            parameter_grid=parameter_grid,
-            preprocessing_config={"summarization_batch_size": 20}
-        )
-        
-        if success:
-            best_params = results["best_params"]
-            best_score = results["best_score"]
-            
-            print(f"\n✅ Parameter search successful!")
-            print(f"Best parameters: {best_params}")
-            print(f"Best score: {best_score:.3f}")
-            
-            # Show results from best parameters
-            best_results = results["best_results"]
-            metrics = best_results["metrics_results"]["metrics"]
-            
-            print(f"\nBest Results:")
-            print(f"  - Clusters: {metrics.get('n_clusters', 0)}")
-            print(f"  - Noise points: {metrics.get('n_noise_points', 0)}")
-            print(f"  - Silhouette score: {metrics.get('silhouette_score', 'N/A')}")
-            
-        else:
-            print(f"\n❌ Parameter search failed: {results.get('error', 'Unknown error')}")
-    
-    except Exception as e:
-        print(f"\n❌ Parameter search failed: {e}")
-
-def demonstrate_training_failure_scenarios():
-    """Demonstrate how the system handles various training failure scenarios"""
-    
-    print("\n" + "="*80)
-    print("TRAINING FAILURE SCENARIO DEMONSTRATIONS")
-    print("="*80)
-    
-    config = Config()
-    orchestrator = TrainingOrchestrator(config)
-    
-    # Scenario 1: Insufficient data
-    print("\n1. Testing with insufficient data...")
-    small_data = create_sample_incident_data(size=10)  # Too small for clustering
-    df_small = pd.DataFrame(small_data)
-    
-    try:
-        success, results = orchestrator.run_end_to_end_training(
-            df=df_small,
-            preprocessing_config={"summarization_batch_size": 5},
-            training_config={
-                "hdbscan_params": {"min_cluster_size": 15, "min_samples": 5},
-                "fallback_params_list": []
-            }
-        )
-        
-        print(f"   Result: {'Success' if success else 'Failed as expected'}")
-        if not success and results["critical_failures"]:
-            print(f"   Reason: {results['critical_failures'][0]}")
-        
-    except Exception as e:
-        print(f"   Error: {e}")
-    
-    # Scenario 2: Bad parameters
-    print("\n2. Testing with invalid parameters...")
-    normal_data = create_sample_incident_data(size=100)
-    df_normal = pd.DataFrame(normal_data)
-    
-    try:
-        success, results = orchestrator.run_end_to_end_training(
-            df=df_normal,
-            training_config={
-                "hdbscan_params": {"min_cluster_size": -5, "min_samples": 0},  # Invalid params
-                "fallback_params_list": [
-                    {"min_cluster_size": 8, "min_samples": 2}  # Valid fallback
-                ]
-            }
-        )
-        
-        print(f"   Result: {'Success with fallback' if success else 'Failed'}")
-        if success:
-            used_fallback = results["training_results"]["training_results"].get("used_fallback", False)
-            print(f"   Used fallback parameters: {used_fallback}")
-        
-    except Exception as e:
-        print(f"   Error: {e}")
-
-def demonstrate_adaptive_parameter_selection():
-    """Demonstrate automatic parameter selection based on dataset size"""
-    
-    print("\n" + "="*80)
-    print("ADAPTIVE PARAMETER SELECTION EXAMPLE")
-    print("="*80)
-    
-    from training.clustering_trainer import ClusteringTrainer
-    
-    # Test different dataset sizes
-    test_sizes = [25, 45, 75, 150, 300]
-    
-    for size in test_sizes:
-        print(f"\nDataset size: {size} samples")
-        
-        suggested = ClusteringTrainer.suggest_parameters_for_dataset_size(size)
-        
-        print(f"  Category: {suggested['dataset_size_category']}")
-        print(f"  Primary params: {suggested['primary_params']}")
-        print(f"  Fallback options: {len(suggested['fallback_params'])} sets")
-        
-        # Show first fallback as example
-        if suggested['fallback_params']:
-            print(f"  First fallback: {suggested['fallback_params'][0]}")
-
-def run_adaptive_training_example():
-    """Example using adaptive parameter selection"""
-    
-    print("\n" + "="*80)
-    print("ADAPTIVE TRAINING EXAMPLE")
-    print("="*80)
-    
-    # Create a small dataset to test adaptive parameters
-    sample_data = create_sample_incident_data(size=35)  # Small dataset
-    df = pd.DataFrame(sample_data)
-    
-    print(f"Input data: {len(df)} incidents (small dataset)")
-    
-    # Get suggested parameters for this dataset size
-    from training.clustering_trainer import ClusteringTrainer
-    suggested = ClusteringTrainer.suggest_parameters_for_dataset_size(len(df))
-    
-    print(f"Suggested parameters for {len(df)} samples:")
-    print(f"  Category: {suggested['dataset_size_category']}")
-    print(f"  Primary: {suggested['primary_params']}")
-    
-    # Initialize the training orchestrator
-    config = Config()
-    orchestrator = TrainingOrchestrator(config)
-    
-    # Use suggested parameters
-    training_config = {
-        "hdbscan_params": suggested['primary_params'],
-        "fallback_params_list": suggested['fallback_params'],
-        "preprocessing_config": {
-            "apply_scaling": True, 
-            "apply_pca": False
-        },
-        "output_dir": "models/adaptive_training"
-    }
-    
-    print("\nRunning training with adaptive parameters...")
-    
-    try:
-        success, results = orchestrator.run_end_to_end_training(
-            df=df,
-            preprocessing_config={"summarization_batch_size": 15},
-            training_config=training_config,
-            save_intermediate_results=True
-        )
-        
-        if success:
-            print("\n✅ Adaptive training successful!")
-            
-            stats = results["pipeline_stats"]
-            training_results = results["training_results"]["training_results"]
-            
-            print(f"📊 Results:")
-            print(f"  - Clusters Found: {stats['clustering_results']['clusters_found']}")
-            print(f"  - Used Fallback: {'Yes' if training_results.get('used_fallback', False) else 'No'}")
-            
-            if training_results.get('used_fallback', False):
-                used_params = training_results.get('successful_params', {})
-                print(f"  - Successful Parameters: {used_params}")
-            
-            print(f"  - Quality Acceptable: {'✅' if stats['clustering_results']['cluster_quality_acceptable'] else '⚠️'}")
-            
-        else:
-            print("\n❌ Adaptive training failed")
-            for failure in results["critical_failures"]:
-                print(f"  - {failure}")
-                
-        return success, results
-        
-    except Exception as e:
-        print(f"\n❌ Adaptive training failed: {e}")
-        return False, None
 
 def create_sample_incident_data(size: int = 100) -> Dict:
     """Create realistic sample incident data for testing"""
@@ -348,14 +229,14 @@ def create_sample_incident_data(size: int = 100) -> Dict:
         {
             "short_desc_templates": [
                 "SharePoint site not loading",
-                "SharePoint access denied",
+                "SharePoint access denied", 
                 "SharePoint sync issues",
                 "SharePoint document upload failed"
             ],
             "desc_templates": [
                 "Users cannot access SharePoint site. Getting timeout errors when trying to load pages.",
                 "SharePoint authentication failing. Users see access denied message.",
-                "SharePoint sync client not working. Files not syncing to local drive.",
+                "SharePoint sync client not working. Files not syncing to local drive.", 
                 "Document upload to SharePoint library fails with error message."
             ],
             "business_service": "SharePoint Online"
@@ -376,7 +257,7 @@ def create_sample_incident_data(size: int = 100) -> Dict:
             ],
             "business_service": "Exchange Online"
         },
-        # Database issues
+        # Database issues  
         {
             "short_desc_templates": [
                 "Database connection timeout",
@@ -427,6 +308,87 @@ def create_sample_incident_data(size: int = 100) -> Dict:
         "business_service": [inc["business_service"] for inc in incidents]
     }
 
+async def demonstrate_scheduled_training():
+    """Demonstrate scheduled training functionality"""
+    
+    print("\n" + "="*80)
+    print("SCHEDULED TRAINING EXAMPLE")
+    print("="*80)
+    
+    config = get_config()
+    orchestrator = PipelineOrchestrator(config)
+    
+    print("Checking if training is due based on schedule...")
+    print(f"Training frequency: {config.training.frequency}")
+    print(f"Training months: {config.training.schedule['months']}")
+    
+    try:
+        training_results = await orchestrator.run_scheduled_training()
+        
+        if training_results["status"] == "success":
+            print("\n✅ Scheduled training completed successfully!")
+            print(f"📊 Results:")
+            print(f"  - Version: {training_results['version']}")
+            print(f"  - Duration: {training_results['training_duration_seconds']/60:.1f} minutes")
+            print(f"  - Models Trained: {training_results['models_trained']}")
+            
+        elif training_results["status"] == "skipped":
+            reason = training_results.get("reason", "unknown")
+            if reason == "not_scheduled":
+                print(f"\n⏭️ Training not due - next training in month {training_results.get('next_training_month', 'unknown')}")
+            elif reason == "model_exists":
+                print(f"\n⏭️ Model already exists for current period")
+            else:
+                print(f"\n⏭️ Training skipped: {reason}")
+                
+        else:
+            print(f"\n❌ Scheduled training failed: {training_results.get('error', 'Unknown error')}")
+        
+        return training_results
+        
+    except Exception as e:
+        logging.error("Scheduled training failed: %s", e)
+        print(f"\n❌ Scheduled training failed: {e}")
+        return None
+
+def show_pipeline_status():
+    """Show current pipeline status and configuration"""
+    
+    print("\n" + "="*80)
+    print("PIPELINE STATUS AND CONFIGURATION")
+    print("="*80)
+    
+    config = get_config()
+    orchestrator = PipelineOrchestrator(config)
+    
+    status = orchestrator.get_pipeline_status()
+    
+    print("📊 Pipeline Configuration:")
+    orchestrator_config = status['orchestrator_config']
+    print(f"  - Training Frequency: {orchestrator_config['training_frequency']}")
+    print(f"  - Training Window: {orchestrator_config['training_window_months']} months")
+    print(f"  - Prediction Frequency: {orchestrator_config['prediction_frequency_minutes']} minutes")
+    print(f"  - Tech Centers: {orchestrator_config['tech_centers_count']}")
+    
+    print(f"\n🎯 Tech Centers:")
+    for i, tech_center in enumerate(config.tech_centers[:5], 1):  # Show first 5
+        print(f"  {i}. {tech_center}")
+    if len(config.tech_centers) > 5:
+        print(f"  ... and {len(config.tech_centers) - 5} more")
+    
+    print(f"\n⚙️ Configuration Details:")
+    print(f"  - HDBSCAN Parameters: {config.clustering.hdbscan}")
+    print(f"  - Domain Grouping: {'Enabled' if config.clustering.domain_grouping['enabled'] else 'Disabled'}")
+    if config.clustering.domain_grouping['enabled']:
+        print(f"    - Max Domains: {config.clustering.domain_grouping['max_domains_per_tech_center']}")
+        print(f"    - Min Incidents: {config.clustering.domain_grouping['min_incidents_per_domain']}")
+    
+    print(f"\n📈 Training Configuration:")
+    print(f"  - Parallel Processing: {config.training.processing['parallel_tech_centers']}")
+    print(f"  - Max Workers: {config.training.processing['max_workers']}")
+    print(f"  - Timeout: {config.training.processing['timeout_hours']} hours")
+    print(f"  - Batch Size: {config.training.processing['batch_size']}")
+
 def show_expected_training_logs():
     """Show what the training logs look like"""
     
@@ -436,66 +398,62 @@ def show_expected_training_logs():
     
     example_logs = """
 2024-01-15 15:00:00 | INFO     | ================================================================================
-2024-01-15 15:00:00 | INFO     | STARTING END-TO-END TRAINING PIPELINE
+2024-01-15 15:00:00 | INFO     | STARTING CUMULATIVE TRAINING CYCLE
 2024-01-15 15:00:00 | INFO     | ================================================================================
-2024-01-15 15:00:00 | INFO     | Input: 200 raw incidents
-2024-01-15 15:00:00 | INFO     | STAGE 1: PREPROCESSING PIPELINE
-2024-01-15 15:00:00 | INFO     | ==================================================
-2024-01-15 15:00:00 | INFO     | Starting complete preprocessing pipeline for 200 incidents
-2024-01-15 15:02:30 | INFO     | ✅ Preprocessing stage successful: 185 embeddings ready for training
-2024-01-15 15:02:30 | INFO     | STAGE 2: CLUSTERING TRAINING
-2024-01-15 15:02:30 | INFO     | ==================================================
-2024-01-15 15:02:30 | INFO     | ============================================================
-2024-01-15 15:02:30 | INFO     | STARTING CLUSTERING TRAINING PIPELINE
-2024-01-15 15:02:30 | INFO     | ============================================================
-2024-01-15 15:02:31 | INFO     | Stage 1: Validating training data...
-2024-01-15 15:02:31 | INFO     | ✓ Data validation passed
-2024-01-15 15:02:31 | INFO     | Stage 2: Preprocessing embeddings...
-2024-01-15 15:02:31 | INFO     | Applying standardization to embeddings...
-2024-01-15 15:02:31 | INFO     | ✓ Standardization applied successfully
-2024-01-15 15:02:31 | INFO     | Stage 3: Training HDBSCAN model...
-2024-01-15 15:02:31 | INFO     | Training HDBSCAN with primary parameters...
-2024-01-15 15:02:32 | INFO     | ✓ Primary parameters successful: 8 clusters, 23 noise points
-2024-01-15 15:02:32 | INFO     | Stage 4: Calculating clustering metrics...
-2024-01-15 15:02:32 | INFO     | ✓ Silhouette score: 0.347
-2024-01-15 15:02:32 | INFO     | ✓ Calinski-Harabasz score: 89.234
-2024-01-15 15:02:32 | INFO     | Stage 5: Validating clustering quality...
-2024-01-15 15:02:32 | INFO     | Stage 6: Saving training results...
-2024-01-15 15:02:33 | INFO     | ✓ Model saved to: models/hdbscan_model_20240115_150233.joblib
-2024-01-15 15:02:33 | INFO     | ✅ Training stage successful
-2024-01-15 15:02:33 | INFO     | ================================================================================
-2024-01-15 15:02:33 | INFO     | END-TO-END PIPELINE COMPLETE - FINAL SUMMARY
-2024-01-15 15:02:33 | INFO     | ================================================================================
-2024-01-15 15:02:33 | INFO     | 🎉 PIPELINE SUCCESSFUL!
-2024-01-15 15:02:33 | INFO     | 📊 Overall Results:
-2024-01-15 15:02:33 | INFO     |   Duration: 2.6 minutes
-2024-01-15 15:02:33 | INFO     |   Success Rate: 81.0% (162/200 incidents clustered)
-2024-01-15 15:02:33 | INFO     | 🎯 Clustering Results:
-2024-01-15 15:02:33 | INFO     |   Clusters found: 8
-2024-01-15 15:02:33 | INFO     |   Quality acceptable: ✅
-2024-01-15 15:02:33 | INFO     |   Silhouette score: 0.347
+2024-01-15 15:00:00 | INFO     | Version: 2024_q4
+2024-01-15 15:00:00 | INFO     | Training window: 24 months
+2024-01-15 15:00:00 | INFO     | Stage 1: Preparing cumulative dataset...
+2024-01-15 15:00:05 | INFO     | Fetching cumulative data from 2022-12-15 to 2024-12-15 (24 months)
+2024-01-15 15:00:30 | INFO     | Dataset prepared: 15,432 incidents across 25 tech centers
+2024-01-15 15:00:30 | INFO     | Stage 2: Running preprocessing pipeline...
+2024-01-15 15:05:45 | INFO     | Preprocessing completed: 14,891 embeddings ready (96.5% success rate)
+2024-01-15 15:05:45 | INFO     | Stage 3: Running training for all tech centers...
+2024-01-15 15:05:45 | INFO     | Starting training for tech center: BT-TC-Network Operations (586 incidents)
+2024-01-15 15:06:12 | INFO     | Training completed for BT-TC-Network Operations: 8 clusters, 12% noise
+2024-01-15 15:06:12 | INFO     | Starting training for tech center: BT-TC-Database Services (423 incidents)
+2024-01-15 15:06:35 | INFO     | Training completed for BT-TC-Database Services: 6 clusters, 15% noise
+2024-01-15 15:12:20 | INFO     | Training completed for all tech centers: 23/25 successful
+2024-01-15 15:12:20 | INFO     | Stage 4: Storing models and updating registry...
+2024-01-15 15:13:45 | INFO     | All models stored successfully in Azure Blob Storage
+2024-01-15 15:13:45 | INFO     | Model registry updated in BigQuery
+2024-01-15 15:13:45 | INFO     | Training cycle completed successfully in 13.8 minutes
     """
     
     print(example_logs)
 
-if __name__ == "__main__":
+async def main():
+    """Main function to run all examples"""
+    
+    print("🚀 HDBSCAN Pipeline Training Examples")
+    print("=" * 80)
+    
+    # Show pipeline configuration
+    show_pipeline_status()
+    
     # Show expected log output
     show_expected_training_logs()
     
-    # Run basic training example
-    success, results = run_basic_training_example()
-    
-    # Demonstrate parameter search
-    if success:  # Only if basic training worked
-        demonstrate_parameter_search()
-    
-    # Demonstrate failure scenarios
-    demonstrate_training_failure_scenarios()
-    
-    # Demonstrate adaptive parameter selection
-    demonstrate_adaptive_parameter_selection()
-    
-    # Run adaptive training example
-    run_adaptive_training_example()
-    
-    print(f"\n🎉 Training examples complete! Check the log files and models/ directory for results.")
+    # Run training examples
+    try:
+        # Example 1: Complete training cycle
+        await run_complete_training_cycle_example()
+        
+        # Example 2: Single tech center training
+        await demonstrate_single_tech_center_training()
+        
+        # Example 3: Prediction cycle
+        await run_prediction_cycle_example()
+        
+        # Example 4: Scheduled training
+        await demonstrate_scheduled_training()
+        
+        print(f"\n🎉 All training examples completed!")
+        print(f"📊 Check the logs and Azure Blob Storage for training results.")
+        
+    except Exception as e:
+        logging.error("Training examples failed: %s", e)
+        print(f"\n❌ Training examples failed: {e}")
+
+if __name__ == "__main__":
+    # Run async main function
+    asyncio.run(main())
