@@ -26,7 +26,7 @@ def setup_logging():
 
 
 def train_command(args):
-    """Execute training command with domain grouping"""
+    """Execute training command with cumulative approach and versioned tables"""
     logger = logging.getLogger(__name__)
     
     try:
@@ -45,7 +45,8 @@ def train_command(args):
         quarters = args.quarters if args.quarters else ["q4"]
         year = args.year
         
-        logger.info(f"Starting training for {len(tech_centers)} tech centers, quarters: {quarters}")
+        logger.info(f"Starting cumulative training for {len(tech_centers)} tech centers, quarters: {quarters}")
+        logger.info(f"Training approach: 24-month rolling window with versioned tables")
         
         results_summary = {}
         
@@ -54,21 +55,33 @@ def train_command(args):
                 try:
                     logger.info(f"Training {tech_center} - Q{quarter} {year}")
                     
-                    # Run enhanced training with domain grouping
+                    # Run enhanced training with cumulative approach and domain grouping
                     results = pipeline.run_training_with_domains(
                         tech_center=tech_center,
                         quarter=quarter,
                         year=year
                     )
                     
+                    # Extract versioned table information
+                    table_info = results["summary"]["bigquery_table"]
+                    training_window = results["summary"]["training_window"]
+                    
                     results_summary[f"{tech_center}_{quarter}"] = {
                         "status": "success",
                         "domains_count": results["summary"]["domains_count"],
                         "clusters_count": results["summary"]["clusters_count"],
+                        "table_name": table_info["table_name"],
+                        "model_version": table_info["model_version"],
+                        "record_count": table_info["record_count"],
+                        "training_window": training_window,
                         "output_dir": results["output_dir"]
                     }
                     
-                    print(f"✅ {tech_center} Q{quarter}: {results['summary']['domains_count']} domains, {results['summary']['clusters_count']} clusters")
+                    print(f"✅ {tech_center} Q{quarter}:")
+                    print(f"   Table: {table_info['table_name']}")
+                    print(f"   Domains: {results['summary']['domains_count']}")
+                    print(f"   Window: {training_window['start_date']} to {training_window['end_date']}")
+                    print(f"   Records: {table_info['record_count']}")
                     
                 except Exception as e:
                     logger.error(f"Training failed for {tech_center} Q{quarter}: {e}")
@@ -80,8 +93,11 @@ def train_command(args):
         
         # Print final summary
         print(f"\n{'='*60}")
-        print("TRAINING SUMMARY")
+        print("CUMULATIVE TRAINING SUMMARY")
         print(f"{'='*60}")
+        print(f"Training Approach: 24-month rolling window")
+        print(f"Table Strategy: Versioned tables per training cycle")
+        print()
         
         successful = sum(1 for r in results_summary.values() if r["status"] == "success")
         total = len(results_summary)
@@ -90,8 +106,13 @@ def train_command(args):
         print(f"Failed: {total - successful}/{total}")
         
         if successful > 0:
-            print(f"\n✅ Enhanced training with domain grouping completed!")
+            print(f"\n✅ Cumulative training with versioned tables completed!")
+            print(f"📊 Created {successful} versioned BigQuery tables")
             print(f"📁 Results saved to: results/")
+            print(f"\n📋 Created Tables:")
+            for key, result in results_summary.items():
+                if result["status"] == "success":
+                    print(f"   • {result['table_name']} ({result['record_count']} records)")
         
         return results_summary
         
@@ -155,6 +176,86 @@ def preprocess_command(args):
     return {"status": "not_implemented"}
 
 
+def print_storage_optimization_info():
+    """Print information about storage cost optimization and versioned tables"""
+    print(f"\n{'='*60}")
+    print(f"💾 STORAGE ARCHITECTURE & MODEL VERSIONING")
+    print(f"{'='*60}")
+    print("📊 Complete Storage Strategy:")
+    print()
+    print("📁 preprocessed_incidents (BigQuery)")
+    print("   └── Contains: embeddings, combined_incidents_summary")
+    print("   └── Storage: HIGH (1536-dim embeddings)")
+    print("   └── Usage: Source data for training/prediction")
+    print("   └── Retention: 24-month rolling window")
+    print()
+    print("🗂️  Model Artifacts (Azure Blob Storage)")
+    print("   └── Path: hdbscan-models/{tech_center}/{year}_{quarter}/")
+    print("   └── Contains: umap_model.pkl, hdbscan_model.pkl, embeddings.npy")
+    print("   └── Storage: MEDIUM (trained models + embeddings)")
+    print("   └── Usage: Production prediction pipeline")
+    print("   └── Versioning: Separate folder per training cycle")
+    print("   └── Examples:")
+    print("      • hdbscan-models/bt-tc-data-analytics/2025_q2/")
+    print("      • hdbscan-models/bt-tc-network-operations/2025_q2/")
+    print("      • hdbscan-models/bt-tc-data-analytics/2025_q4/")
+    print()
+    print("📁 clustering_predictions_{year}_{quarter}_{hash} (BigQuery)")
+    print("   └── Contains: cluster_id, domain_id, umap_x, umap_y")
+    print("   └── Storage: LOW (no embeddings, only coordinates)")
+    print("   └── Usage: Training results + domain mappings")
+    print("   └── Versioning: New table per training cycle")
+    print("   └── Reference: Points to blob storage model artifacts")
+    print()
+    print("📁 incident_predictions (BigQuery)")
+    print("   └── Contains: predicted_cluster_id, confidence_score")
+    print("   └── Storage: LOW (no embeddings, only predictions)")
+    print("   └── Usage: Real-time classification results")
+    print("   └── Reference: model_table_used, blob_model_path")
+    print()
+    print("🔄 Complete Workflow:")
+    print("   1. Training: Load data from preprocessed_incidents")
+    print("   2. Training: Save models to blob storage")
+    print("   3. Training: Save results to versioned BigQuery table")
+    print("   4. Prediction: Load models from blob storage")
+    print("   5. Prediction: Load domain mappings from BigQuery")
+    print("   6. Prediction: Save results to incident_predictions")
+    print()
+    print("💰 Cost Optimization:")
+    print("   • BigQuery: ~50% storage reduction (no duplicate embeddings)")
+    print("   • Blob Storage: Efficient model artifact storage")
+    print("   • Separation: Training data vs. Model artifacts vs. Results")
+    print()
+    print("📋 Model Versioning Benefits:")
+    print("   • Clear artifact lineage in blob storage")
+    print("   • Easy rollback to previous model versions")
+    print("   • Parallel model testing (A/B testing)")
+    print("   • Cost-effective long-term model retention")
+    print(f"{'='*60}")
+    print()
+    print("Example Storage Layout:")
+    print("  Azure Blob Storage:")
+    print("    hdbscan-models/")
+    print("    ├── bt-tc-data-analytics/")
+    print("    │   ├── 2024_q4/  ← Previous model")
+    print("    │   │   ├── umap_model.pkl")
+    print("    │   │   ├── hdbscan_model.pkl")
+    print("    │   │   └── model_metadata.json")
+    print("    │   └── 2025_q2/  ← Current model")
+    print("    │       ├── umap_model.pkl")
+    print("    │       ├── hdbscan_model.pkl")
+    print("    │       └── model_metadata.json")
+    print("    └── bt-tc-network-operations/")
+    print("        └── 2025_q2/")
+    print("            └── ...")
+    print()
+    print("  BigQuery Tables:")
+    print("    • clustering_predictions_2024_q4_789  ← Previous results")
+    print("    • clustering_predictions_2025_q2_789  ← Current results")
+    print("    • incident_predictions                ← Live predictions")
+    print(f"{'='*60}")
+
+
 def main():
     """Main entry point for the enhanced HDBSCAN pipeline"""
     parser = argparse.ArgumentParser(
@@ -189,6 +290,10 @@ Examples:
     # Status command
     status_parser = subparsers.add_parser('status', help='Show pipeline status')
     status_parser.set_defaults(func=status_command)
+    
+    # Storage info command  
+    info_parser = subparsers.add_parser('info', help='Show storage optimization information')
+    info_parser.set_defaults(func=lambda args: print_storage_optimization_info())
     
     # Preprocessing command
     preprocess_parser = subparsers.add_parser('preprocess', help='Preprocess incident data')

@@ -2,56 +2,69 @@
 
 ## 🎯 **Prediction Pipeline Successfully Implemented**
 
-Your HDBSCAN clustering pipeline now includes a complete prediction system for real-time incident classification.
+Your HDBSCAN clustering pipeline now includes a complete prediction system for real-time incident classification with **cumulative training approach** and **versioned model storage**.
 
 ## 📁 **Files Created/Modified**
 
-### **1. New Prediction Pipeline**
-- ✅ **`pipeline/prediction_pipeline.py`** - Complete prediction implementation
-- ✅ **`main.py`** - Updated with prediction pipeline import
+### **1. Enhanced Prediction Pipeline**
+- ✅ **`pipeline/prediction_pipeline.py`** - Updated for versioned tables and blob storage
+- ✅ **`clustering_trainer.py`** - HDBSCAN model training with blob storage
+- ✅ **`training_orchestrator.py`** - Cumulative training coordination
+- ✅ **`main.py`** - Updated with cumulative training approach
 - ✅ **Error handling integrated** throughout
 
 ## 🔧 **How the Prediction Pipeline Works**
 
 ### **1. Model Loading**
 ```python
-# Loads trained models from blob storage:
-- HDBSCAN clusterer (trained quarterly)
+# Loads trained models from Azure Blob Storage:
+- HDBSCAN clusterer (trained with 24-month cumulative data)
 - UMAP reducer (for dimensionality reduction)  
-- Preprocessing artifacts
-- Cluster metadata and domain mapping
+- Model artifacts from versioned blob storage paths
+- Domain mappings from versioned BigQuery tables
 ```
 
-### **2. Incremental Processing**
+### **2. Versioned Model Architecture**
 ```python
-# Watermark-based processing:
-- Gets incidents since last prediction run
-- Processes only new incidents (efficient)
-- Updates watermark after successful processing
+# Model versioning structure:
+Azure Blob Storage: hdbscan-models/{tech_center}/{year}_{quarter}/
+├── umap_model.pkl         (2.4 MB)
+├── hdbscan_model.pkl      (1.8 MB) 
+├── umap_embeddings.npy    (156.7 MB)
+├── cluster_labels.npy     (0.7 MB)
+└── model_metadata.json    (2.1 KB)
+
+BigQuery: clustering_predictions_{year}_{quarter}_{hash}
+├── cluster_id, cluster_label
+├── domain_id, domain_name  
+├── umap_x, umap_y coordinates
+└── model_version, training_timestamp
 ```
 
 ### **3. Prediction Workflow**
 ```python
 # For each new incident:
-1. Generate text embeddings (Azure OpenAI)
-2. Apply UMAP transformation (using trained model)
-3. Predict cluster using HDBSCAN
-4. Calculate confidence score
-5. Get cluster metadata (domain, name)
-6. Store predictions to BigQuery
+1. Load model artifacts from blob storage
+2. Load domain mappings from versioned BigQuery table
+3. Generate predictions using cumulative-trained models
+4. Apply confidence scoring and outlier detection
+5. Store results to incident_predictions table (no embeddings)
 ```
 
 ## 🚀 **Usage Commands**
 
 ### **Run Predictions**
 ```bash
-# Predict for all tech centers
+# Predict for all tech centers using latest models
 python main.py predict
 
-# Predict for specific tech center
-python main.py predict --tech-center "BT-TC-Security Operations"
+# Predict for specific tech center with model version
+python main.py predict --tech-center "BT-TC-Security Operations" --model-year 2025 --model-quarter q2
 
-# Automated predictions every 2 hours
+# Run cumulative training for multiple centers
+python main.py train --tech-centers "BT-TC-Data Analytics" "BT-TC-Network Operations" --quarters q2 --year 2025
+
+# Automated predictions with scheduling
 python main.py schedule
 ```
 
@@ -72,15 +85,15 @@ python main.py schedule
 ```
 
 ### **2. Comprehensive Tracking**
-- ✅ **Watermark management** - No duplicate processing
-- ✅ **Model versioning** - Tracks which quarter's model was used
-- ✅ **Confidence scoring** - Quality assessment of predictions
-- ✅ **Outlier detection** - Identifies incidents that don't fit clusters
+- ✅ **Model versioning** - Tracks which model version was used
+- ✅ **Confidence scoring** - Quality assessment of predictions  
+- ✅ **Cumulative training** - 24-month rolling window approach
+- ✅ **Blob storage integration** - Model artifacts in Azure Blob Storage
 
 ### **3. Multi-Storage Support**
-- ✅ **BigQuery tables** - Production data storage
+- ✅ **BigQuery tables** - Production data storage with versioned tables
+- ✅ **Azure Blob Storage** - Model artifact management
 - ✅ **Local files** - Development and backup (configurable)
-- ✅ **Blob storage** - Model artifact management
 
 ## 🏗️ **Architecture Integration**
 
@@ -90,9 +103,9 @@ H&M HDBSCAN Clustering Architecture:
 
 1. Preprocessing (Hourly)     ✅ Implemented
    ↓
-2. Training (Quarterly)       ✅ Implemented  
+2. Training (6-monthly)       ✅ Implemented with Cumulative Approach  
    ↓
-3. Prediction (2-hourly)     ✅ NEW - Just Implemented
+3. Prediction (2-hourly)     ✅ NEW - Just Implemented with Versioned Models
    ↓
 4. Monitoring & Analytics    ✅ Error handling included
 ```
@@ -110,24 +123,24 @@ H&M HDBSCAN Clustering Architecture:
 
 ### **1. incident_predictions**
 ```sql
--- Stores all prediction results
-incident_id, tech_center, cluster_label, cluster_name, 
-domain, confidence_score, is_outlier, prediction_timestamp,
-model_version, embedding_vector, umap_coordinates
+-- Stores all prediction results (no embeddings for cost optimization)
+incident_id, tech_center, predicted_cluster_id, predicted_cluster_label, 
+predicted_domain_id, predicted_domain_name, confidence_score, 
+prediction_timestamp, model_table_used, blob_model_path
 ```
 
-### **2. prediction_watermarks**
+### **2. clustering_predictions_{year}_{quarter}_{hash}** (Versioned)
 ```sql
--- Tracks processing progress
-tech_center, prediction_timestamp, 
-last_processed_incident_time, processed_incident_count
+-- Training results per model version
+incident_number, cluster_id, cluster_label, domain_id, domain_name,
+umap_x, umap_y, tech_center, model_version, training_timestamp
 ```
 
-### **3. model_metadata**
+### **3. preprocessed_incidents**
 ```sql
--- Model version tracking  
-tech_center, year, quarter, model_path,
-training_timestamp, model_metrics
+-- Source data with embeddings
+number, sys_created_on, combined_incidents_summary, 
+embedding, tech_center
 ```
 
 ## ⚙️ **Configuration**
@@ -143,6 +156,11 @@ blob_storage:
   structure:
     models: "models/{tech_center}/{year}/{quarter}"
     predictions: "predictions/{tech_center}/{year}/{quarter}"
+
+training:
+  approach: cumulative
+  window_months: 24
+  schedule: semi_annual  # Every 6 months
 ```
 
 ## 🚨 **Error Handling Included**

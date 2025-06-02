@@ -1,29 +1,30 @@
 ═══════════════════════════════════════════════════════════════════════════════════
                     HDBSCAN CLUSTERING PIPELINE FLOW ILLUSTRATION
-                              Anonymous Implementation
+                        CUMULATIVE TRAINING WITH VERSIONED STORAGE
 ═══════════════════════════════════════════════════════════════════════════════════
 
 ## 🏗️ OVERALL ARCHITECTURE OVERVIEW
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                           HYBRID AZURE ARCHITECTURE                            │
+│                    HYBRID CLOUD ARCHITECTURE WITH VERSIONING                   │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                 │
 │  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐         │
 │  │  AZURE FUNCTIONS │    │  AZURE FUNCTIONS │    │   AZURE VM       │         │
 │  │   (Consumption)  │    │    (Premium)     │    │   (Training)     │         │
 │  │                  │    │                  │    │                  │         │
-│  │   PREPROCESSING  │    │   PREDICTION     │    │    TRAINING      │         │
-│  │   Every 1 Hour   │    │   Every 2 Hours  │    │   Quarterly      │         │
-│  │                  │    │                  │    │   (Manual)       │         │
+│  │   PREPROCESSING  │    │   PREDICTION     │    │   CUMULATIVE     │         │
+│  │   Every 1 Hour   │    │   Every 2 Hours  │    │   TRAINING       │         │
+│  │                  │    │                  │    │  Semi-Annual     │         │
 │  └──────────────────┘    └──────────────────┘    └──────────────────┘         │
 │           │                        │                        │                  │
 │           ▼                        ▼                        ▼                  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐   │
-│  │                       SHARED STORAGE LAYER                             │   │
+│  │                    VERSIONED STORAGE LAYER                             │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐ │   │
-│  │  │   BigQuery   │  │ Blob Storage │  │ App Insights │  │ Key Vault   │ │   │
-│  │  │   Tables     │  │   Models     │  │  Monitoring  │  │  Secrets    │ │   │
+│  │  │   BigQuery   │  │ Azure Blob   │  │ App Insights │  │ Key Vault   │ │   │
+│  │  │  Versioned   │  │ Model Store  │  │  Monitoring  │  │  Secrets    │ │   │
+│  │  │   Tables     │  │  Artifacts   │  │              │  │             │ │   │
 │  │  └──────────────┘  └──────────────┘  └──────────────┘  └─────────────┘ │   │
 │  └─────────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────────┘
@@ -121,87 +122,110 @@ Tech Center Prediction Loop:
 │    (number, predicted_cluster, cluster_topic, domain, confidence_score)       │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
-### STAGE 3: TRAINING PIPELINE (QUARTERLY - MANUAL)
+### STAGE 3: CUMULATIVE TRAINING PIPELINE (SEMI-ANNUAL)
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                                TRAINING FLOW                                   │
+│                           CUMULATIVE TRAINING FLOW                             │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
-Manual Trigger (Data Scientist)
+Manual Trigger (Every 6 Months)
         │
         ▼
 ┌───────────────────┐     ┌─────────────────┐     ┌──────────────────┐
-│  python main_     │────▶│  Get Quarter    │────▶│   Load Training  │
-│  enhanced.py train│     │     Data        │     │      Data        │
-│  --quarter q4     │     │                 │     │                  │
+│  python main.py   │────▶│  Load 24-Month  │────▶│   Cumulative     │
+│  train --year     │     │  Historical     │     │   Training       │
+│  2025 --quarter q2│     │     Data        │     │   Dataset        │
 └───────────────────┘     └─────────────────┘     └──────────────────┘
                                                            │
                                                            ▼
 ┌───────────────────┐     ┌─────────────────┐     ┌──────────────────┐
-│  Save Models to   │◀────│  Parallel Train │◀────│   UMAP + HDBSCAN │
-│   Blob Storage    │     │  15 Tech Centers│     │     Training     │
-│                   │     │                 │     │                  │
+│  Save to Blob     │◀────│  Create Models  │◀────│   UMAP + HDBSCAN │
+│  Storage +        │     │  & Domain       │     │   Training on    │
+│  Versioned BigQuery│     │  Groupings      │     │   24-Month Data  │
 └───────────────────┘     └─────────────────┘     └──────────────────┘
 
-Parallel Training Process:
+Cumulative Training Process (24-Month Rolling Window):
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ PARALLEL TRAINING (ThreadPoolExecutor, max_workers=4):                         │
+│ CUMULATIVE TRAINING APPROACH:                                                  │
 │                                                                                 │
-│ ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐           │
-│ │ Tech Center │  │ Tech Center │  │ Tech Center │  │ Tech Center │           │
-│ │     1       │  │     2       │  │     3       │  │     4       │           │
-│ │             │  │             │  │             │  │             │           │
-│ │ 1. Load Q4  │  │ 1. Load Q4  │  │ 1. Load Q4  │  │ 1. Load Q4  │           │
-│ │    Data     │  │    Data     │  │    Data     │  │    Data     │           │
-│ │ 2. UMAP     │  │ 2. UMAP     │  │ 2. UMAP     │  │ 2. UMAP     │           │
-│ │    Fit      │  │    Fit      │  │    Fit      │  │    Fit      │           │
-│ │ 3. HDBSCAN  │  │ 3. HDBSCAN  │  │ 3. HDBSCAN  │  │ 3. HDBSCAN  │           │
-│ │    Fit      │  │    Fit      │  │    Fit      │  │    Fit      │           │
-│ │ 4. LLM      │  │ 4. LLM      │  │ 4. LLM      │  │ 4. LLM      │           │
-│ │    Labels   │  │    Labels   │  │    Labels   │  │    Labels   │           │
-│ │ 5. Save     │  │ 5. Save     │  │ 5. Save     │  │ 5. Save     │           │
-│ │    Models   │  │    Models   │  │    Models   │  │    Models   │           │
-│ └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘           │
-│       ▼                ▼                ▼                ▼                     │
-│ ┌─────────────────────────────────────────────────────────────────────────┐   │
-│ │             BLOB STORAGE: prediction-artifacts/                        │   │
-│ │  BT_TC_Product_Development_Engineering/2024/q4/                        │   │
-│ │  ├── clustering/                                                       │   │
-│ │  │   ├── hdbscan_clusterer.pkl                                         │   │
-│ │  │   └── umap_reducer.pkl                                              │   │
-│ │  ├── analysis/                                                         │   │
-│ │  │   ├── labeled_clusters.json                                         │   │
-│ │  │   └── domains.json                                                  │   │
-│ │  └── metadata/                                                         │   │
-│ │      └── training_metadata.json                                        │   │
-│ └─────────────────────────────────────────────────────────────────────────┘   │
+│ Training Schedule (Semi-Annual):                                               │
+│ • June 2025: Train on July 2023 → June 2025 (24 months)                      │
+│ • December 2025: Train on January 2024 → December 2025 (24 months)           │
+│ • June 2026: Train on July 2024 → June 2026 (24 months)                      │
+│                                                                                 │
+│ Benefits:                                                                       │
+│ • Pattern Stability: Long-term trend capture                                   │
+│ • Seasonal Coverage: Full seasonal cycles included                             │
+│ • Data Richness: Large training datasets for robust models                     │
+│ • Cost Efficiency: Training frequency reduced vs. quarterly                    │
+│                                                                                 │
+│ FOR EACH TECH CENTER:                                                          │
+│                                                                                 │
+│ 1. Load 24-month cumulative dataset:                                           │
+│    FROM preprocessed_incidents                                                 │
+│    WHERE sys_created_on >= '2023-07-01'                                       │
+│    AND sys_created_on <= '2025-06-30'                                         │
+│    AND tech_center = 'BT-TC-Data Analytics'                                   │
+│                                                                                 │
+│ 2. Train on large dataset (typically 80k+ incidents):                         │
+│    - UMAP dimensionality reduction (1536 → 2D)                                │
+│    - HDBSCAN clustering with optimal parameters                                │
+│    - Domain grouping (max 20 domains per tech center)                         │
+│                                                                                 │
+│ 3. Save model artifacts to Azure Blob Storage:                                │
+│    hdbscan-models/bt-tc-data-analytics/2025_q2/                               │
+│    ├── umap_model.pkl         (2.4 MB)                                        │
+│    ├── hdbscan_model.pkl      (1.8 MB)                                        │
+│    ├── umap_embeddings.npy    (156.7 MB)                                      │
+│    ├── cluster_labels.npy     (0.7 MB)                                        │
+│    └── model_metadata.json    (2.1 KB)                                        │
+│                                                                                 │
+│ 4. Save training results to versioned BigQuery table:                         │
+│    clustering_predictions_2025_q2_789                                         │
+│    ├── incident_number, cluster_id, cluster_label                             │
+│    ├── domain_id, domain_name                                                 │
+│    ├── umap_x, umap_y coordinates                                             │
+│    └── model_version, training_timestamp                                      │
+│                                                                                 │
+│ 5. Link blob storage path to BigQuery metadata                                │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
-## 🔄 COMPLETE QUARTERLY CYCLE
+## 🔄 COMPLETE SEMI-ANNUAL CYCLE
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                          QUARTERLY OPERATIONAL CYCLE                           │
+│                          SEMI-ANNUAL OPERATIONAL CYCLE                         │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                 │
-│  JANUARY - MARCH (Q1)                                                         │
-│  ────────────────────                                                         │
+│  JANUARY - JUNE 2025 (6 MONTHS)                                               │
+│  ────────────────────────────────                                             │
 │  📅 Daily: Preprocessing (hourly) + Prediction (2-hourly)                     │
-│  📊 Using: Q4 2023 models                                                     │
-│  💾 Data: Accumulating in preprocessing_pipeline.preprocessed_incidents       │
+│  📊 Using: 2024_q4 models (24-month trained on Jan 2023 → Dec 2024)          │
+│  💾 Data: Accumulating in preprocessed_incidents table                        │
+│  📈 Coverage: Full seasonal patterns + trending data                          │
 │                                                                                 │
-│  END OF MARCH: Q1 TRAINING                                                    │
-│  ─────────────────────────                                                    │
-│  🔧 Manual: python main_enhanced.py train --year 2024 --quarter q1            │
-│  ⏱️  Duration: 2-4 hours                                                       │
-│  📦 Output: New Q1 2024 models stored in Blob Storage                         │
-│  🔄 Switch: Functions automatically use Q1 2024 models                        │
+│  JUNE 2025: SEMI-ANNUAL TRAINING                                              │
+│  ─────────────────────────────────                                            │
+│  🔧 Manual: python training_orchestrator.py --year 2025 --quarter q2          │
+│  📊 Dataset: July 2023 → June 2025 (24-month cumulative)                     │
+│  ⏱️  Duration: 3-6 hours (larger datasets)                                     │
+│  📦 Output: New 2025_q2 models stored in blob storage                         │
+│  📋 Results: clustering_predictions_2025_q2_789 BigQuery table                │
+│  🔄 Switch: Functions automatically use 2025_q2 models                        │
 │                                                                                 │
-│  APRIL - JUNE (Q2)                                                            │
-│  ──────────────────                                                           │
+│  JULY - DECEMBER 2025 (6 MONTHS)                                              │
+│  ─────────────────────────────────                                            │
 │  📅 Daily: Preprocessing + Prediction continues                               │
-│  📊 Using: Q1 2024 models                                                     │
-│  💾 Data: More incidents accumulating                                         │
+│  📊 Using: 2025_q2 models (24-month trained data)                             │
+│  💾 Data: More incidents accumulating for next training                       │
+│  🎯 Stability: Robust patterns from large training window                     │
 │                                                                                 │
-│  ... cycle continues for Q2, Q3, Q4 ...                                      │
+│  DECEMBER 2025: SEMI-ANNUAL TRAINING                                          │
+│  ───────────────────────────────────                                          │
+│  🔧 Manual: python training_orchestrator.py --year 2025 --quarter q4          │
+│  📊 Dataset: January 2024 → December 2025 (24-month cumulative)               │
+│  📦 Output: New 2025_q4 models                                                │
+│  📋 Results: clustering_predictions_2025_q4_456 BigQuery table                │
+│                                                                                 │
+│  ... cycle continues with 24-month rolling windows ...                        │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
 ## 💾 DATA STORAGE STRUCTURE
@@ -211,7 +235,7 @@ Parallel Training Process:
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                 │
 │  📊 RAW DATA:                                                                  │
-│  enterprise-dashboardnp-cd35.bigquery_datasets_spoke_oa_dev.incidents_table   │
+│  your-project.your_dataset.incident_table                                     │
 │  ├── number (STRING)                                                           │
 │  ├── short_description (STRING)                                                │
 │  ├── description (STRING)                                                      │
@@ -220,7 +244,7 @@ Parallel Training Process:
 │  └── ... other incident fields                                                 │
 │                                                                                 │
 │  🔄 PREPROCESSED DATA:                                                         │
-│  enterprise-dashboardnp-cd35.preprocessing_pipeline.preprocessed_incidents    │
+│  your-project.hdbscan_pipeline.preprocessed_incidents                         │
 │  ├── number (STRING)                                                           │
 │  ├── sys_created_on (TIMESTAMP)                                                │
 │  ├── combined_incidents_summary (STRING)                                       │
@@ -228,53 +252,63 @@ Parallel Training Process:
 │  ├── tech_center (STRING)                                                      │
 │  └── processed_at (TIMESTAMP)                                                  │
 │                                                                                 │
-│  🎯 PREDICTIONS:                                                               │
-│  enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.clustering_       │
-│  predictions                                                                   │
-│  ├── number (STRING)                                                           │
-│  ├── predicted_cluster (INTEGER)                                               │
-│  ├── cluster_topic (STRING)                                                    │
+│  🎯 VERSIONED TRAINING RESULTS:                                                │
+│  your-project.hdbscan_pipeline.clustering_predictions_2025_q2_789             │
+│  ├── incident_number (STRING)                                                  │
+│  ├── cluster_id (INTEGER)                                                      │
+│  ├── cluster_label (STRING)                                                    │
+│  ├── domain_id (INTEGER)                                                       │
 │  ├── domain_name (STRING)                                                      │
+│  ├── umap_x (FLOAT64)                                                          │
+│  ├── umap_y (FLOAT64)                                                          │
+│  ├── tech_center (STRING)                                                      │
+│  ├── model_version (STRING)                                                    │
+│  └── training_timestamp (TIMESTAMP)                                            │
+│                                                                                 │
+│  🔮 LIVE PREDICTIONS:                                                          │
+│  your-project.hdbscan_pipeline.incident_predictions                           │
+│  ├── incident_id (STRING)                                                      │
+│  ├── predicted_cluster_id (INTEGER)                                            │
+│  ├── predicted_cluster_label (STRING)                                          │
+│  ├── predicted_domain_id (INTEGER)                                             │
+│  ├── predicted_domain_name (STRING)                                            │
 │  ├── confidence_score (FLOAT64)                                                │
 │  ├── tech_center (STRING)                                                      │
-│  └── predicted_at (TIMESTAMP)                                                  │
-│                                                                                 │
-│  📝 WATERMARKS:                                                                │
-│  enterprise-dashboardnp-cd35.preprocessing_pipeline.preprocessing_watermarks  │
-│  ├── tech_center (STRING)                                                      │
-│  ├── last_processed_timestamp (TIMESTAMP)                                      │
-│  └── updated_at (TIMESTAMP)                                                    │
+│  ├── prediction_timestamp (TIMESTAMP)                                          │
+│  ├── model_table_used (STRING)                                                 │
+│  └── blob_model_path (STRING)                                                  │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                              BLOB STORAGE STRUCTURE                            │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                 │
-│  prediction-artifacts/                                                         │
-│  ├── models/                                                                   │
-│  │   ├── BT_TC_Product_Development_Engineering/                               │
-│  │   │   ├── 2024/                                                            │
-│  │   │   │   ├── q1/                                                          │
-│  │   │   │   │   ├── clustering/                                              │
-│  │   │   │   │   │   ├── hdbscan_clusterer.pkl                                │
-│  │   │   │   │   │   └── umap_reducer.pkl                                     │
-│  │   │   │   │   ├── analysis/                                                │
-│  │   │   │   │   │   ├── labeled_clusters.json                                │
-│  │   │   │   │   │   └── domains.json                                         │
-│  │   │   │   │   └── metadata/                                                │
-│  │   │   │   │       └── training_metadata.json                               │
-│  │   │   │   ├── q2/ (similar structure)                                      │
-│  │   │   │   ├── q3/ (similar structure)                                      │
-│  │   │   │   └── q4/ (similar structure)                                      │
-│  │   │   └── current -> 2024/q4  (symlink to current quarter)                 │
-│  │   ├── BT_TC_Infrastructure_Services/ (similar structure)                   │
-│  │   ├── BT_TC_Network_Operations/ (similar structure)                        │
-│  │   └── ... (13 more tech centers)                                           │
-│  ├── predictions/                                                              │
-│  │   └── batch_predictions/ (archived prediction results)                     │
-│  └── monitoring/                                                               │
-│      ├── drift_detection/                                                      │
-│      └── performance_tracking/                                                 │
+│  hdbscan-models/                                                               │
+│  ├── bt-tc-data-analytics/                                                     │
+│  │   ├── 2024_q4/                                                             │
+│  │   │   ├── umap_model.pkl         (2.4 MB)                                  │
+│  │   │   ├── hdbscan_model.pkl      (1.8 MB)                                  │
+│  │   │   ├── umap_embeddings.npy    (156.7 MB)                                │
+│  │   │   ├── cluster_labels.npy     (0.7 MB)                                  │
+│  │   │   └── model_metadata.json    (2.1 KB)                                  │
+│  │   └── 2025_q2/                                                             │
+│  │       ├── umap_model.pkl         (2.4 MB)                                  │
+│  │       ├── hdbscan_model.pkl      (1.8 MB)                                  │
+│  │       ├── umap_embeddings.npy    (156.7 MB)                                │
+│  │       ├── cluster_labels.npy     (0.7 MB)                                  │
+│  │       └── model_metadata.json    (2.1 KB)                                  │
+│  ├── bt-tc-network-operations/                                                 │
+│  │   ├── 2024_q4/                                                             │
+│  │   └── 2025_q2/                                                             │
+│  ├── bt-tc-security-operations/                                                │
+│  │   ├── 2024_q4/                                                             │
+│  │   └── 2025_q2/                                                             │
+│  └── ... (12 more tech centers)                                               │
+│                                                                                 │
+│  Cost Optimization:                                                            │
+│  • Model artifacts: ~161.6 MB per tech center per version                     │
+│  • No embedding duplication across tables                                      │
+│  • Efficient versioned storage with clear lineage                             │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
 ## ⏰ TIMELINE EXAMPLE: ONE WEEK OPERATIONS
@@ -383,14 +417,14 @@ Cost Tracking:
 │ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐                   │
 │ │ Preprocessing   │ │   Prediction    │ │    Training     │                   │
 │ │   Functions     │ │   Functions     │ │      VM         │                   │
-│ │      $45        │ │     $165        │ │      $35        │                   │
-│ │ (Consumption)   │ │   (Premium)     │ │ (16 hrs/quarter)│                   │
+│ │      $45        │ │     $165        │ │      $25        │                   │
+│ │ (Consumption)   │ │   (Premium)     │ │ (8 hrs/6months) │                   │
 │ └─────────────────┘ └─────────────────┘ └─────────────────┘                   │
 │                                                                                 │
 │ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐                   │
 │ │  Blob Storage   │ │    BigQuery     │ │     Total       │                   │
 │ │  (Models/Logs)  │ │  (Data/Queries) │ │   Monthly       │                   │
-│ │      $25        │ │      $75        │ │     $345        │                   │
+│ │      $30        │ │      $85        │ │     $350        │                   │
 │ └─────────────────┘ └─────────────────┘ └─────────────────┘                   │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
@@ -398,9 +432,16 @@ Cost Tracking:
 
 1. ⏰ **HOURLY**: New incidents detected → text summarized → embeddings generated
 2. ⏰ **2-HOURLY**: Embeddings classified → clusters assigned → results stored  
-3. ⏰ **QUARTERLY**: All data retrained → new models created → automatic deployment
+3. ⏰ **SEMI-ANNUAL**: 24-month cumulative data retrained → new versioned models → automatic deployment
 4. 📊 **CONTINUOUS**: Monitoring metrics → error handling → cost optimization
-5. 👥 **TEAM**: Automated operations + quarterly manual training supervision
+5. 👥 **TEAM**: Automated operations + semi-annual manual training supervision
+
+KEY BENEFITS OF CUMULATIVE APPROACH:
+- 🎯 **Pattern Stability**: 24-month windows capture long-term trends
+- 💰 **Cost Reduction**: ~50% storage costs through versioned architecture  
+- 🔄 **Model Versioning**: Clear lineage and rollback capabilities
+- 📈 **Robust Training**: Large datasets (80k+ incidents) for better accuracy
+- ⏱️ **Reduced Frequency**: Semi-annual vs. quarterly training reduces overhead
 
 ═══════════════════════════════════════════════════════════════════════════════════
                               END OF FLOW ILLUSTRATION

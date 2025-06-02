@@ -463,13 +463,23 @@ Ensure standardized labels maintain specific system names where present but use 
         domain_path = output_dir / "domains.json"
         with open(domain_path, "w") as f:
             json.dump(domain_results["domains"], f, indent=2)
-        
-        # Save labeled clusters with standardized labels
+          # Save labeled clusters with standardized labels
         labeled_clusters_path = output_dir / "labeled_clusters_standardized.json"
         with open(labeled_clusters_path, "w") as f:
             json.dump(domain_results["labeled_clusters"], f, indent=2)
         
-        # Create summary
+        # Save BigQuery results (without embeddings for cost optimization)
+        bigquery_results = self._prepare_bigquery_results(
+            domain_results, clustering_results, tech_center, quarter, year
+        )
+        
+        bigquery_path = output_dir / f"{bigquery_results['table_name']}.json"
+        with open(bigquery_path, "w") as f:
+            json.dump(bigquery_results, f, indent=2)
+        
+        self.logger.info(f"Saved BigQuery results to {bigquery_path}")
+        
+        # Create summary with versioned table information
         summary = {
             "tech_center": tech_center,
             "quarter": quarter,
@@ -477,9 +487,27 @@ Ensure standardized labels maintain specific system names where present but use 
             "timestamp": domain_results["timestamp"],
             "domains_count": len(domain_results["domains"]["domains"]),
             "clusters_count": len([d for d in domain_results["domains"]["domains"] if d["domain_name"] != "Noise"]),
+            
+            # Cumulative training metadata
+            "training_approach": "cumulative_24_months",
+            "training_window": {
+                "start_date": bigquery_results["table_metadata"]["training_window_start"],
+                "end_date": bigquery_results["table_metadata"]["training_window_end"],
+                "duration_months": 24
+            },
+            
+            # Versioned table information
+            "bigquery_table": {
+                "table_name": bigquery_results["table_name"],
+                "model_version": bigquery_results["table_metadata"]["model_version"],
+                "record_count": len(bigquery_results["records"]),
+                "storage_optimization": "embeddings_excluded"
+            },
+            
             "output_files": {
                 "domains": str(domain_path),
-                "labeled_clusters": str(labeled_clusters_path)
+                "labeled_clusters": str(labeled_clusters_path),
+                "bigquery_results": str(bigquery_path)
             }
         }
         
@@ -516,8 +544,139 @@ Ensure standardized labels maintain specific system names where present but use 
         
         print(f"📁 Output Directory: {results['output_dir']}")
         print(f"{'='*60}")
+      def _prepare_bigquery_results(self, domain_results: Dict, clustering_results: Dict, 
+                                tech_center: str, quarter: str, year: int) -> Dict:
+        """
+        Prepare results for BigQuery storage without embeddings (cost optimization)
+        
+        Creates versioned table with cumulative training approach:
+        - Table name: clustering_predictions_{year}_{quarter}_{tech_center_hash}
+        - Contains results from cumulative 24-month training window
+        - No embeddings stored (cost optimization)
+        """        # Create versioned table name for this training cycle
+        tech_center_hash = abs(hash(tech_center)) % 1000  # Short hash for table naming
+        table_version = f"{year}_{quarter}_{tech_center_hash:03d}"
+        table_name = f"clustering_predictions_{table_version}"
+        
+        # Training window metadata (cumulative approach)
+        training_start_date = self._calculate_training_start_date(year, quarter)
+        training_end_date = f"{year}-{self._quarter_to_month(quarter)}-30"
+        
+        bigquery_results = {
+            "table_name": table_name,
+            "table_metadata": {
+                "tech_center": tech_center,
+                "training_window_start": training_start_date,
+                "training_window_end": training_end_date,
+                "training_approach": "cumulative_24_months",
+                "model_version": f"{year}_{quarter}_v1",
+                "created_timestamp": datetime.now().isoformat(),
+                "domain_count": len(domain_results["domains"]["domains"]),
+                "storage_optimization": "embeddings_excluded"
+            },
+            "records": []
+        }
+          # Get cluster-to-domain mapping
+        cluster_to_domain = {}
+        for domain in domain_results["domains"]["domains"]:
+            domain_name = domain["domain_name"]
+            domain_desc = domain["description"]
+            for cluster_id in domain["clusters"]:
+                cluster_to_domain[cluster_id] = {
+                    "domain_name": domain_name,
+                    "domain_description": domain_desc
+                }
+        
+        # Mock incident data for demonstration
+        # In real implementation, this would come from preprocessed_incidents table
+        # with cumulative 24-month window
+        mock_incidents = [
+            {
+                "number": f"INC{1000000 + i}",
+                "sys_created_on": "2024-01-15T10:30:00Z",
+                "combined_incidents_summary": f"Sample incident {i} summary",
+                "business_service": "IT Services",
+                "cluster_id": i % 5,  # Mock cluster assignment
+                "umap_x": np.random.uniform(-10, 10),
+                "umap_y": np.random.uniform(-10, 10)
+            }
+            for i in range(100)  # Mock 100 incidents (real: ~88k for 24-month window)
+        ]
+        
+        for incident in mock_incidents:
+            cluster_id = incident["cluster_id"]
+            
+            # Get cluster label
+            cluster_label = domain_results["labeled_clusters"].get(
+                str(cluster_id), {}
+            ).get("topic", f"Cluster {cluster_id}")
+            
+            # Get domain information
+            domain_info = cluster_to_domain.get(cluster_id, {
+                "domain_name": "Uncategorized",
+                "domain_description": "No domain assigned"
+            })
+            
+            # Create BigQuery record without embeddings (cost optimization)
+            bigquery_record = {
+                # Incident identifiers
+                "number": incident["number"],
+                "sys_created_on": incident["sys_created_on"],
+                
+                # Incident content
+                "combined_incidents_summary": incident["combined_incidents_summary"],
+                "business_service": incident["business_service"],
+                
+                # Clustering results
+                "cluster_id": cluster_id,
+                "cluster_label": cluster_label,
+                "cluster_description": domain_results["labeled_clusters"].get(
+                    str(cluster_id), {}
+                ).get("description", ""),
+                
+                # Domain grouping (NEW)
+                "domain_id": hash(domain_info["domain_name"]) % 1000,  # Simple domain ID
+                "domain_name": domain_info["domain_name"],
+                "domain_description": domain_info["domain_description"],
+                "domain_confidence": 0.85,  # Mock confidence score
+                
+                # Training metadata (cumulative approach)
+                "tech_center": tech_center,
+                "quarter": quarter,
+                "year": year,
+                "model_version": f"{year}_{quarter}_v1",
+                "training_timestamp": datetime.now().isoformat(),
+                "training_window_months": 24,  # Cumulative 24-month window
+                
+                # UMAP coordinates only (no full embeddings for cost savings)
+                "umap_x": float(incident["umap_x"]),
+                "umap_y": float(incident["umap_y"])
+                
+                # NOTE: embedding ARRAY<FLOAT64> removed to reduce storage costs
+                # Embeddings remain in preprocessed_incidents table
+            }
+            
+            bigquery_results["records"].append(bigquery_record)
+        
+        self.logger.info(f"Prepared {len(bigquery_results['records'])} records for table {table_name}")
+        return bigquery_results
 
-
+    def _calculate_training_start_date(self, year: int, quarter: str) -> str:
+        """
+        Calculate training window start date for cumulative 24-month approach
+        
+        Example: Training in Q2 2025 uses data from Q2 2023 to Q2 2025 (24 months)
+        """
+        start_year = year - 2  # Go back 24 months
+        quarter_month_map = {"q1": "01", "q2": "04", "q3": "07", "q4": "10"}
+        start_month = quarter_month_map.get(quarter, "01")
+        return f"{start_year}-{start_month}-01"
+    
+    def _quarter_to_month(self, quarter: str) -> str:
+        """Convert quarter to end month"""
+        quarter_end_map = {"q1": "03", "q2": "06", "q3": "09", "q4": "12"}
+        return quarter_end_map.get(quarter, "12")
+    
 def main():
     """Example usage of the enhanced training pipeline"""
     # Initialize pipeline

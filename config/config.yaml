@@ -22,14 +22,22 @@ bigquery:
   
   # Service account configuration
   service_account_key_path: ${SERVICE_ACCOUNT_KEY_PATH}
-  
-  # Table configurations (from .env)
+    # Table configurations (from .env)
   tables:
     team_services: ${TEAM_SERVICES_TABLE}
     incidents: ${INCIDENT_TABLE}
     raw_incidents: ${INCIDENT_TABLE}  # Alias for compatibility
-    problems: ${PROBLEM_TABLE}    preprocessed_incidents: "enterprise-dashboardnp-cd35.preprocessing_pipeline.preprocessed_incidents"
+    problems: ${PROBLEM_TABLE}
+    
+    # Data pipeline tables - optimized for cost efficiency
+    preprocessed_incidents: "enterprise-dashboardnp-cd35.preprocessing_pipeline.preprocessed_incidents"
+    # ^ Contains: embeddings, combined_incidents_summary, preprocessing metadata
+    # ^ Storage: HIGH (embeddings are expensive to store)
+    
     clustering_predictions: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.clustering_predictions"
+    # ^ Contains: cluster results, domain grouping, UMAP coordinates (NO embeddings)
+    # ^ Storage: LOW (analytical results only, references preprocessed_incidents for embeddings)
+    
     preprocessing_watermarks: "enterprise-dashboardnp-cd35.preprocessing_pipeline.preprocessing_watermarks"
     
     # Legacy support for original pipeline

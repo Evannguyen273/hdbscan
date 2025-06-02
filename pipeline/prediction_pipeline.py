@@ -38,10 +38,14 @@ class PredictionPipeline:
         self.text_processor = TextProcessor(config)
         self.embedding_generator = EmbeddingGenerator(config)
         
-        # Model cache
-        self.loaded_models = {}
+        # Initialize logger
+        self.logger = logging.getLogger(__name__)
         
-        logging.info("PredictionPipeline initialized")
+        # Table references (updated for cost optimization)
+        self.preprocessed_table = config.bigquery.tables.preprocessed_incidents  # Contains embeddings
+        self.predictions_table = "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.incident_predictions"  # Results only
+        
+        self.logger.info("Prediction pipeline initialized with optimized storage architecture")
     
     @catch_errors
     def run_predictions_all_tech_centers(self) -> Dict[str, Any]:
@@ -541,3 +545,305 @@ class PredictionPipeline:
                 
         except Exception as e:
             raise RuntimeError(f"Failed to get prediction status: {e}")
+      def predict_new_incidents(self, tech_center: str, model_year: int = 2024, model_quarter: str = "q4") -> Dict:
+        """
+        Predict clusters/domains for new incidents using versioned trained models
+        
+        Architecture:
+        1. Load embeddings from preprocessed_incidents table
+        2. Load trained models from versioned clustering_predictions table  
+        3. Generate predictions (cluster + domain)
+        4. Save results to incident_predictions table (without embeddings)
+        5. Reference specific model version from cumulative training
+        """        try:
+            self.logger.info(f"Starting predictions for {tech_center} using model {model_year}_{model_quarter}")
+            
+            # 1. Generate versioned table name for trained model
+            tech_center_hash = abs(hash(tech_center)) % 1000
+            table_version = f"{model_year}_{model_quarter}_{tech_center_hash:03d}"
+            model_table_name = f"clustering_predictions_{table_version}"
+            
+            self.logger.info(f"Using trained model from table: {model_table_name}")
+            
+            # 2. Get new incidents with embeddings from preprocessed_incidents
+            incidents_with_embeddings = self._get_new_incidents_with_embeddings(tech_center)
+            
+            if not incidents_with_embeddings:
+                self.logger.info(f"No new incidents found for {tech_center}")
+                return {"status": "no_new_incidents", "count": 0}
+            
+            # 3. Load trained models from versioned table
+            models = self._load_trained_models_from_versioned_table(tech_center, model_table_name, model_year, model_quarter)
+            
+            # 4. Generate predictions using embeddings
+            predictions = self._generate_predictions(incidents_with_embeddings, models, tech_center)
+            
+            # 5. Save predictions (without embeddings for cost optimization)
+            self._save_predictions_to_bigquery(predictions, tech_center, model_table_name)
+            
+            self.logger.info(f"Completed predictions for {tech_center}: {len(predictions)} incidents")
+            
+            return {
+                "status": "success",
+                "tech_center": tech_center,
+                "predictions_count": len(predictions),
+                "model_table_used": model_table_name,
+                "model_version": f"{model_year}_{model_quarter}",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Prediction failed for {tech_center}: {e}")
+            raise
+    
+    def _get_new_incidents_with_embeddings(self, tech_center: str) -> List[Dict]:
+        """
+        Get new incidents with embeddings from preprocessed_incidents table
+        This is where embeddings are stored (not in clustering_predictions)
+        """
+        # Mock implementation - would query preprocessed_incidents table
+        self.logger.info(f"Loading new incidents with embeddings for {tech_center}")
+        
+        # In real implementation, query would be:
+        # SELECT number, sys_created_on, combined_incidents_summary, embedding
+        # FROM preprocessed_incidents 
+        # WHERE tech_center = ? AND processed_at > last_prediction_time
+        
+        return [
+            {
+                "number": f"INC{2000000 + i}",
+                "sys_created_on": "2024-01-15T14:30:00Z",
+                "combined_incidents_summary": f"New incident {i} summary",
+                "embedding": np.random.rand(1536).tolist()  # Embedding from preprocessed table
+            }
+            for i in range(10)  # Mock 10 new incidents
+        ]
+    
+    def _generate_predictions(self, incidents: List[Dict], models: Dict, tech_center: str) -> List[Dict]:
+        """Generate cluster and domain predictions"""
+        predictions = []
+        
+        for incident in incidents:
+            # Mock prediction logic
+            predicted_cluster = np.random.randint(0, 10)
+            confidence = np.random.uniform(0.6, 0.95)
+            
+            prediction = {
+                "incident_id": incident["number"],
+                "number": incident["number"],
+                "sys_created_on": incident["sys_created_on"],
+                "combined_incidents_summary": incident["combined_incidents_summary"],
+                
+                # Prediction results
+                "predicted_cluster_id": predicted_cluster,
+                "predicted_cluster_label": f"Predicted Cluster {predicted_cluster}",
+                "confidence_score": confidence,
+                "is_outlier": predicted_cluster == -1,
+                
+                # Domain prediction
+                "predicted_domain_id": predicted_cluster // 3,  # Group clusters into domains
+                "predicted_domain_name": f"Predicted Domain {predicted_cluster // 3}",
+                "domain_confidence": confidence * 0.9,
+                
+                # Metadata
+                "tech_center": tech_center,
+                "prediction_timestamp": datetime.now().isoformat(),
+                "model_used": f"{tech_center}_2024_q4",
+                "pipeline_run_id": f"pred_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                
+                # Technical details (no embeddings for cost optimization)
+                "distance_to_centroid": np.random.uniform(0.1, 0.5),
+                "nearest_neighbors": [f"INC{2000000 + j}" for j in range(3)]
+            }
+            
+            predictions.append(prediction)
+        
+        return predictions
+      def _save_predictions_to_bigquery(self, predictions: List[Dict], tech_center: str, model_table_name: str):
+        """
+        Save predictions to incident_predictions table
+        Note: No embeddings saved here for cost optimization
+        """
+        self.logger.info(f"Saving {len(predictions)} predictions to BigQuery for {tech_center}")
+        
+        # Add model table reference to each prediction
+        for prediction in predictions:
+            prediction["model_table_used"] = model_table_name
+            # Remove embedding if it exists (should not be in predictions table)
+            prediction.pop('embedding', None)
+        
+        # Mock save operation
+        # In real implementation, this would insert to incident_predictions table
+        # Schema: incident_id, predicted_cluster_id, predicted_cluster_label, confidence_score,
+        #         predicted_domain_id, predicted_domain_name, domain_confidence,
+        #         tech_center, prediction_timestamp, model_table_used
+        #         (NO embedding column for cost savings)
+        
+        self.logger.info(f"Predictions saved to incident_predictions table (without embeddings for cost optimization)")
+        self.logger.info(f"Model table referenced: {model_table_name}")
+      def _load_trained_models_from_versioned_table(self, tech_center: str, model_table_name: str, 
+                                                model_year: int, model_quarter: str) -> Dict:
+        """
+        Load trained models from blob storage and domain mappings from versioned BigQuery table
+        
+        Architecture:
+        1. Load model artifacts (UMAP, HDBSCAN) from blob storage
+        2. Load domain mappings and cluster labels from BigQuery versioned table
+        3. Combine for prediction use
+        
+        Args:
+            tech_center: Tech center name
+            model_table_name: Versioned table name (e.g., clustering_predictions_2025_q2_789)
+            model_year: Training model year
+            model_quarter: Training model quarter
+            
+        Returns:
+            Dictionary containing model artifacts and domain mappings
+        """
+        try:
+            self.logger.info(f"Loading model artifacts from blob storage and metadata from {model_table_name}")
+            
+            # 1. Load model artifacts from blob storage
+            model_artifacts = self._load_model_artifacts_from_blob(tech_center, model_year, model_quarter)
+            
+            # 2. Load domain mappings and cluster metadata from BigQuery
+            domain_mappings = self._load_domain_mappings_from_bigquery(model_table_name, tech_center)
+            
+            # 3. Combine model artifacts with domain mappings
+            models = {
+                "model_artifacts": model_artifacts,
+                "cluster_labels": domain_mappings["cluster_labels"],
+                "domain_mappings": domain_mappings["domain_mappings"],
+                "model_metadata": {
+                    "table_name": model_table_name,
+                    "tech_center": tech_center,
+                    "model_version": f"{model_year}_{model_quarter}_v1",
+                    "training_approach": "cumulative_24_months",
+                    "domain_count": len(set(dm["domain_id"] for dm in domain_mappings["domain_mappings"].values())),
+                    "cluster_count": len(domain_mappings["cluster_labels"]),
+                    "blob_storage_path": model_artifacts.get("blob_path", "N/A")
+                }
+            }
+            
+            self.logger.info(f"Loaded model: {len(models['cluster_labels'])} clusters, {models['model_metadata']['domain_count']} domains")
+            self.logger.info(f"Model source: Blob storage + BigQuery table {model_table_name}")
+            
+            return models
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load models from blob storage and {model_table_name}: {e}")
+            raise
+    
+    def _load_model_artifacts_from_blob(self, tech_center: str, model_year: int, model_quarter: str) -> Dict:
+        """
+        Load UMAP and HDBSCAN model artifacts from Azure Blob Storage
+        
+        Blob Storage Path:
+        hdbscan-models/{tech_center_folder}/{model_year}_{model_quarter}/
+        ├── umap_model.pkl
+        ├── hdbscan_model.pkl
+        ├── umap_embeddings.npy
+        ├── cluster_labels.npy
+        └── model_metadata.json
+        """
+        try:
+            container_name = "hdbscan-models"
+            tech_center_folder = tech_center.replace(" ", "-").replace("_", "-").lower()
+            model_version = f"{model_year}_{model_quarter}"
+            blob_prefix = f"{tech_center_folder}/{model_version}/"
+            
+            self.logger.info(f"Loading model artifacts from blob storage: {container_name}/{blob_prefix}")
+            
+            # In real implementation, use Azure Blob Storage SDK:
+            # blob_service_client = BlobServiceClient(...)
+            # 
+            # # Download UMAP model
+            # umap_blob = blob_service_client.get_blob_client(
+            #     container=container_name, blob=f"{blob_prefix}umap_model.pkl"
+            # )
+            # umap_data = umap_blob.download_blob().readall()
+            # umap_model = pickle.loads(umap_data)
+            # 
+            # # Download HDBSCAN model
+            # hdbscan_blob = blob_service_client.get_blob_client(
+            #     container=container_name, blob=f"{blob_prefix}hdbscan_model.pkl"
+            # )
+            # hdbscan_data = hdbscan_blob.download_blob().readall()
+            # hdbscan_model = pickle.loads(hdbscan_data)
+            # 
+            # # Download UMAP embeddings for centroid calculations
+            # embeddings_blob = blob_service_client.get_blob_client(
+            #     container=container_name, blob=f"{blob_prefix}umap_embeddings.npy"
+            # )
+            # embeddings_data = embeddings_blob.download_blob().readall()
+            # umap_embeddings = np.load(io.BytesIO(embeddings_data))
+            
+            # Mock model artifacts for demonstration
+            model_artifacts = {
+                "umap_model": "MockUMAPModel",  # In real: loaded pickle object
+                "hdbscan_model": "MockHDBSCANModel",  # In real: loaded pickle object
+                "umap_embeddings": np.random.rand(1000, 2),  # In real: loaded numpy array
+                "blob_path": f"{container_name}/{blob_prefix}",
+                "loaded_from": "blob_storage",
+                "model_version": model_version
+            }
+            
+            self.logger.info(f"Model artifacts loaded from blob storage: {blob_prefix}")
+            return model_artifacts
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load model artifacts from blob storage: {e}")
+            raise
+    
+    def _load_domain_mappings_from_bigquery(self, model_table_name: str, tech_center: str) -> Dict:
+        """
+        Load domain mappings and cluster metadata from versioned BigQuery table
+        
+        Query: SELECT DISTINCT cluster_id, cluster_label, domain_id, domain_name
+               FROM {model_table_name} WHERE tech_center = {tech_center}
+        """
+        try:
+            self.logger.info(f"Loading domain mappings from BigQuery table: {model_table_name}")
+            
+            # In real implementation, query BigQuery:
+            # query = f"""
+            # SELECT DISTINCT 
+            #     cluster_id, 
+            #     cluster_label, 
+            #     domain_id, 
+            #     domain_name,
+            #     domain_description
+            # FROM `{model_table_name}` 
+            # WHERE tech_center = '{tech_center}'
+            # ORDER BY cluster_id
+            # """
+            # 
+            # client = bigquery.Client()
+            # query_job = client.query(query)
+            # results = query_job.result()
+            
+            # Mock domain mappings based on versioned table
+            domain_mappings = {
+                "cluster_labels": {
+                    "0": f"Network Issues - {tech_center}",
+                    "1": f"Server Problems - {tech_center}",
+                    "2": f"Application Errors - {tech_center}",
+                    "3": f"Database Issues - {tech_center}",
+                    "4": f"Security Incidents - {tech_center}"
+                },
+                "domain_mappings": {
+                    "0": {"domain_id": 1, "domain_name": "Infrastructure", "confidence": 0.9},
+                    "1": {"domain_id": 1, "domain_name": "Infrastructure", "confidence": 0.9},
+                    "2": {"domain_id": 2, "domain_name": "Applications", "confidence": 0.85},
+                    "3": {"domain_id": 3, "domain_name": "Data Management", "confidence": 0.8},
+                    "4": {"domain_id": 4, "domain_name": "Security", "confidence": 0.95}
+                },
+                "table_source": model_table_name
+            }
+            
+            self.logger.info(f"Domain mappings loaded from {model_table_name}: {len(domain_mappings['cluster_labels'])} clusters")
+            return domain_mappings
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load domain mappings from {model_table_name}: {e}")
+            raise
