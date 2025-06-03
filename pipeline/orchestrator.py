@@ -353,6 +353,36 @@ class PipelineOrchestrator:
         table_id = self.config.bigquery.predictions_table
         return await self.bigquery_client.insert_predictions(table_id, predictions)
     
+    async def _log_training_event(self, run_id: str, tech_center: str, 
+                                 model_version: str, stage: str, 
+                                 level: str, message: str, details: Dict = None):
+        """Log training events to BigQuery training_logs table"""
+        try:
+            log_entry = {
+                'run_id': run_id,
+                'timestamp': datetime.now(),
+                'pipeline_stage': stage,
+                'tech_center': tech_center,
+                'model_version': model_version,
+                'log_level': level,
+                'message': message,
+                'details': details
+            }
+            
+            await self.bigquery_client.insert_training_log(log_entry)
+            
+        except Exception as e:
+            logging.error("Failed to log training event: %s", str(e))
+    
+    async def _update_processing_watermark(self, tech_center: str, timestamp: datetime):
+        """Update processing watermark for a tech center"""
+        try:
+            await self.bigquery_client.update_watermark(
+                'training_pipeline', tech_center, timestamp
+            )
+        except Exception as e:
+            logging.error("Failed to update watermark for %s: %s", tech_center, str(e))
+    
     def get_pipeline_status(self) -> Dict:
         """Get current pipeline status and statistics"""
         return {

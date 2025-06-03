@@ -147,6 +147,72 @@ class EmbeddingBatchSchema(BaseModel):
             raise ValueError("Count cannot exceed total count")
         return v
 
+class TrainingLogSchema(BaseModel):
+    """Schema for training log entries"""
+    run_id: str
+    timestamp: datetime
+    pipeline_stage: Optional[str] = None
+    tech_center: Optional[str] = None
+    model_version: Optional[str] = None
+    log_level: str
+    message: str
+    details: Optional[Dict[str, Any]] = None
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+class WatermarkSchema(BaseModel):
+    """Schema for processing watermarks"""
+    pipeline_name: str
+    tech_center: str
+    last_processed_timestamp: Optional[datetime] = None
+    last_processed_id: Optional[str] = None
+    updated_at: datetime
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+class VersionedTrainingResultSchema(BaseModel):
+    """Schema for versioned training results (clustering_predictions_{version}_{hash})"""
+    incident_number: str
+    cluster_id: int
+    cluster_label: Optional[str] = None
+    domain_id: Optional[int] = None
+    domain_name: Optional[str] = None
+    umap_x: Optional[float] = None
+    umap_y: Optional[float] = None
+    tech_center: str
+    model_version: str
+    confidence_score: Optional[float] = None
+    created_timestamp: datetime
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+class IncidentPredictionSchema(BaseModel):
+    """Schema for live incident predictions"""
+    incident_id: str
+    predicted_cluster_id: int
+    predicted_cluster_label: Optional[str] = None
+    confidence_score: Optional[float] = None
+    predicted_domain_id: Optional[int] = None
+    predicted_domain_name: Optional[str] = None
+    tech_center: str
+    prediction_timestamp: datetime
+    model_table_used: Optional[str] = None
+    blob_model_path: Optional[str] = None
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
 # Utility functions for schema validation
 def validate_incident_batch(incidents: List[Dict]) -> List[ValidationResultSchema]:
     """Validate a batch of incidents and return validation results"""

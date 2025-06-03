@@ -206,6 +206,60 @@ def test_incident_schema_validation():
         print(f"❌ Incident schema validation test failed: {e}")
         return False
 
+def test_operational_tables_configured():
+    """Test that operational tables (training_logs, watermarks) are configured"""
+    try:
+        from config.config import Config
+        config = Config()
+        tables = config.bigquery.tables
+        
+        operational_tables = ['training_logs', 'watermarks']
+        
+        missing_tables = []
+        for table in operational_tables:
+            if not hasattr(tables, table):
+                missing_tables.append(table)
+            elif getattr(tables, table) is None:
+                missing_tables.append(f"{table} (None value)")
+            elif not getattr(tables, table).strip():
+                missing_tables.append(f"{table} (empty)")
+        
+        if missing_tables:
+            print(f"❌ Missing operational table configurations: {missing_tables}")
+            return False
+        else:
+            print("✅ All operational tables are configured")
+            return True
+            
+    except Exception as e:
+        print(f"❌ Operational tables configuration test failed: {e}")
+        return False
+
+def test_new_configuration_sections():
+    """Test that new configuration sections are properly loaded"""
+    try:
+        from config.config import Config
+        config = Config()
+        
+        # Test new sections exist
+        new_sections = ['monitoring', 'cost_optimization', 'performance', 'security', 'tech_centers_config']
+        missing_sections = []
+        
+        for section in new_sections:
+            if not hasattr(config, section):
+                missing_sections.append(section)
+        
+        if missing_sections:
+            print(f"❌ Missing configuration sections: {missing_sections}")
+            return False
+        else:
+            print("✅ All new configuration sections are accessible")
+            return True
+            
+    except Exception as e:
+        print(f"❌ New configuration sections test failed: {e}")
+        return False
+
 def run_all_tests():
     """Run all tests and return summary"""
     tests = [
@@ -215,7 +269,9 @@ def run_all_tests():
         test_environment_variable_substitution,
         test_tech_centers_configuration,
         test_schema_definitions_exist,
-        test_incident_schema_validation
+        test_incident_schema_validation,
+        test_operational_tables_configured,
+        test_new_configuration_sections
     ]
     
     print("Running configuration and schema validation tests...\n")

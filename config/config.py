@@ -5,7 +5,7 @@ import yaml
 import os
 import json
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import logging
 from dotenv import load_dotenv
 from pydantic import BaseModel, validator
@@ -159,6 +159,36 @@ class Config:
                 # Old format - simple list
                 return tech_centers_config
         return []
+    
+    @property
+    def monitoring(self):
+        """Get monitoring configuration"""
+        return MonitoringConfig(**self.config.get('monitoring', {}))
+    
+    @property
+    def cost_optimization(self):
+        """Get cost optimization configuration"""
+        return CostOptimizationConfig(**self.config.get('cost_optimization', {}))
+    
+    @property
+    def performance(self):
+        """Get performance configuration"""
+        return PerformanceConfig(**self.config.get('performance', {}))
+    
+    @property
+    def security(self):
+        """Get security configuration"""  
+        return SecurityConfig(**self.config.get('security', {}))
+    
+    @property
+    def tech_centers_config(self):
+        """Get tech centers configuration with validation"""
+        return TechCentersConfig(**self.config.get('tech_centers', {}))
+    
+    @property
+    def logging_config(self):
+        """Get logging configuration"""
+        return LoggingConfig(**self.config.get('logging', {}))
 
 class BigQueryTableConfig(BaseModel):
     """Configuration for BigQuery tables with validation"""
@@ -171,8 +201,8 @@ class BigQueryTableConfig(BaseModel):
     training_data: str
     predictions: str
     model_registry: str
-    training_logs: str
-    watermarks: str
+    training_logs: str  # Added for operational logging
+    watermarks: str     # Added for processing checkpoints
     
     @validator('*')
     def validate_table_names(cls, v):
@@ -375,6 +405,52 @@ class PredictionConfig:
             'max_distance_to_cluster': 2.0,
             'enable_domain_prediction': True
         })
+
+# Add new Pydantic models for expanded configuration sections
+
+class MonitoringConfig(BaseModel):
+    """Configuration for monitoring and alerting"""
+    metrics: Dict[str, List[str]]
+    alerts: Dict[str, bool]
+
+class CostOptimizationConfig(BaseModel):
+    """Configuration for cost optimization strategies"""
+    storage: Dict[str, bool]
+    training: Dict[str, bool]
+    queries: Dict[str, Any]
+
+class PerformanceConfig(BaseModel):
+    """Configuration for performance and scaling"""
+    memory: Dict[str, Any]
+    parallel: Dict[str, Any]
+    caching: Dict[str, Any]
+
+class SecurityConfig(BaseModel):
+    """Configuration for security and governance"""
+    encryption_at_rest: bool = True
+    encryption_in_transit: bool = True
+    audit_logging: bool = True
+    rbac_enabled: bool = True
+    service_account_rotation: bool = True
+    data_retention_days: int = 730
+    pii_handling: str = "anonymized"
+
+class TechCenterConfig(BaseModel):
+    """Configuration for tech centers"""
+    name: str
+    slug: str
+    min_incidents: int
+
+class TechCentersConfig(BaseModel):
+    """Configuration for all tech centers"""
+    primary: List[TechCenterConfig]
+    additional: List[str]
+
+class LoggingConfig(BaseModel):
+    """Configuration for logging"""
+    level: str = "INFO"
+    format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    handlers: Dict[str, Dict[str, Any]]
 
 # Global configuration instance
 _config_instance = None

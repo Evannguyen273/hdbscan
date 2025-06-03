@@ -492,3 +492,140 @@ class BigQueryClient:
             "total_query_time": 0
         }
         logging.info("BigQuery client statistics reset")
+    async def insert_training_log(self, log_entry: Dict) -> bool:
+        """Insert training log entry into BigQuery"""
+        try:
+            table_id = self.config.bigquery.tables.training_logs
+            
+            # Add timestamp if not provided
+            if 'timestamp' not in log_entry:
+                log_entry['timestamp'] = datetime.now()
+            
+            # Validate required fields
+            required_fields = ['run_id', 'log_level', 'message']
+            for field in required_fields:
+                if field not in log_entry:
+                    raise ValueError(f"Missing required field: {field}")
+            
+            return await self.insert_rows(table_id, [log_entry])
+            
+        except Exception as e:
+            logging.error("Failed to insert training log: %s", str(e))
+            return False
+    
+    async def get_watermark(self, pipeline_name: str, tech_center: str) -> Optional[datetime]:
+        """Get watermark for a specific pipeline and tech center"""
+        try:
+            table_id = self.config.bigquery.tables.watermarks
+            
+            query = f"""
+            SELECT last_processed_timestamp
+            FROM `{table_id}`
+            WHERE pipeline_name = @pipeline_name 
+            AND tech_center = @tech_center
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """
+            
+            job_config = self.create_query_job_config()
+            job_config.query_parameters = [
+                bigquery.ScalarQueryParameter("pipeline_name", "STRING", pipeline_name),
+                bigquery.ScalarQueryParameter("tech_center", "STRING", tech_center)
+            ]
+            
+            df = await self.execute_query(query, job_config)
+            
+            if len(df) > 0 and not pd.isna(df['last_processed_timestamp'].iloc[0]):
+                return df['last_processed_timestamp'].iloc[0]
+            
+            return None
+            
+        except Exception as e:
+            logging.error("Failed to get watermark: %s", str(e))
+            return None
+    
+    async def update_watermark(self, pipeline_name: str, tech_center: str, 
+                             timestamp: datetime, last_processed_id: str = None) -> bool:
+        """Update watermark for a specific pipeline and tech center"""
+        try:
+            table_id = self.config.bigquery.tables.watermarks
+            
+            watermark_entry = {
+                'pipeline_name': pipeline_name,
+                'tech_center': tech_center,
+                'last_processed_timestamp': timestamp,
+                'last_processed_id': last_processed_id,
+                'updated_at': datetime.now()
+            }
+            
+            # Use MERGE to upsert the watermark
+            query = f"""
+            MERGE `{table_id}` T
+            USING (
+                SELECT 
+                    @pipeline_name as pipeline_name,
+                    @tech_center as tech_center,
+                    @last_processed_timestamp as last_processed_timestamp,
+                    @last_processed_id as last_processed_id,
+                    @updated_at as updated_at
+            ) S
+            ON T.pipeline_name = S.pipeline_name AND T.tech_center = S.tech_center
+            WHEN MATCHED THEN
+                UPDATE SET 
+                    last_processed_timestamp = S.last_processed_timestamp,
+                    last_processed_id = S.last_processed_id,
+                    updated_at = S.updated_at
+            WHEN NOT MATCHED THEN
+                INSERT (pipeline_name, tech_center, last_processed_timestamp, last_processed_id, updated_at)
+                VALUES (S.pipeline_name, S.tech_center, S.last_processed_timestamp, S.last_processed_id, S.updated_at)
+            """
+            
+            job_config = self.create_query_job_config()
+            job_config.query_parameters = [
+                bigquery.ScalarQueryParameter("pipeline_name", "STRING", pipeline_name),
+                bigquery.ScalarQueryParameter("tech_center", "STRING", tech_center),
+                bigquery.ScalarQueryParameter("last_processed_timestamp", "TIMESTAMP", timestamp),
+                bigquery.ScalarQueryParameter("last_processed_id", "STRING", last_processed_id),
+                bigquery.ScalarQueryParameter("updated_at", "TIMESTAMP", datetime.now())
+            ]
+            
+            query_job = self.client.query(query, job_config=job_config)
+            query_job.result()  # Wait for completion
+            
+            logging.info("Updated watermark for %s - %s to %s", pipeline_name, tech_center, timestamp)
+            return True
+            
+        except Exception as e:
+            logging.error("Failed to update watermark: %s", str(e))
+            return False
+    
+    async def create_operational_tables(self) -> bool:
+        """Create operational tables (training_logs, watermarks) if they don't exist"""
+        try:
+            # Create training_logs table
+            training_logs_schema = self.config.bigquery.schemas.get('training_logs', [])
+            if training_logs_schema:
+                training_logs_success = self.create_table_if_not_exists(
+                    self.config.bigquery.tables.training_logs,
+                    training_logs_schema
+                )
+            else:
+                training_logs_success = False
+                logging.error("training_logs schema not found in configuration")
+            
+            # Create watermarks table
+            watermarks_schema = self.config.bigquery.schemas.get('watermarks', [])
+            if watermarks_schema:
+                watermarks_success = self.create_table_if_not_exists(
+                    self.config.bigquery.tables.watermarks,
+                    watermarks_schema
+                )
+            else:
+                watermarks_success = False
+                logging.error("watermarks schema not found in configuration")
+            
+            return training_logs_success and watermarks_success
+            
+        except Exception as e:
+            logging.error("Failed to create operational tables: %s", str(e))
+            return False

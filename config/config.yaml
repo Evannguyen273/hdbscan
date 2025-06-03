@@ -49,12 +49,11 @@ bigquery:
     incidents: ${INCIDENT_TABLE}
     team_services: ${TEAM_SERVICES_TABLE}
     problems: ${PROBLEM_TABLE}
-    
-    # Source table for training data (was hardcoded in bigquery_client.py)
+      # Source table for training data (was hardcoded in bigquery_client.py)
     incident_source: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.your_incident_table"
     
     # Pipeline tables - HYBRID STORAGE ARCHITECTURE
-    preprocessed_incidents: "preprocessing_pipeline.preprocessed_incidents"
+    preprocessed_incidents: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.preprocessed_incidents"
     # ^ Contains: embeddings, summaries, metadata (HIGH cost but necessary)
     
     # Versioned training results (NO embeddings for cost optimization)
@@ -67,8 +66,10 @@ bigquery:
     
     # Model tracking
     model_registry: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.model_registry"
-    training_logs: "training_logs"
-    watermarks: "preprocessing_pipeline.preprocessing_watermarks"
+    
+    # Operational tables (BigQuery)
+    training_logs: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.training_logs"
+    watermarks: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.preprocessing_watermarks"
 
   # SQL Query templates to eliminate hardcoded queries
   queries:
@@ -121,6 +122,51 @@ bigquery:
       - {name: "model_version", type: "STRING", mode: "REQUIRED"}
       - {name: "prediction_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
       - {name: "domain_group", type: "STRING", mode: "NULLABLE"}
+    
+    # ADD SCHEMAS FOR OPERATIONAL TABLES
+    training_logs:
+      - {name: "run_id", type: "STRING", mode: "REQUIRED"}
+      - {name: "timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
+      - {name: "pipeline_stage", type: "STRING", mode: "NULLABLE"}
+      - {name: "tech_center", type: "STRING", mode: "NULLABLE"}
+      - {name: "model_version", type: "STRING", mode: "NULLABLE"}
+      - {name: "log_level", type: "STRING", mode: "REQUIRED"}
+      - {name: "message", type: "STRING", mode: "REQUIRED"}
+      - {name: "details", type: "JSON", mode: "NULLABLE"}
+
+    watermarks:
+      - {name: "pipeline_name", type: "STRING", mode: "REQUIRED"} # e.g., 'preprocessing', 'prediction'
+      - {name: "tech_center", type: "STRING", mode: "REQUIRED"}
+      - {name: "last_processed_timestamp", type: "TIMESTAMP", mode: "NULLABLE"}
+      - {name: "last_processed_id", type: "STRING", mode: "NULLABLE"}
+      - {name: "updated_at", type: "TIMESTAMP", mode: "REQUIRED"}
+      
+    # Schema for versioned training results tables (clustering_predictions_{version}_{hash})
+    versioned_training_results:
+      - {name: "incident_number", type: "STRING", mode: "REQUIRED"}
+      - {name: "cluster_id", type: "INTEGER", mode: "REQUIRED"}
+      - {name: "cluster_label", type: "STRING", mode: "NULLABLE"}
+      - {name: "domain_id", type: "INTEGER", mode: "NULLABLE"}
+      - {name: "domain_name", type: "STRING", mode: "NULLABLE"}
+      - {name: "umap_x", type: "FLOAT", mode: "NULLABLE"}
+      - {name: "umap_y", type: "FLOAT", mode: "NULLABLE"}
+      - {name: "tech_center", type: "STRING", mode: "REQUIRED"}
+      - {name: "model_version", type: "STRING", mode: "REQUIRED"}
+      - {name: "confidence_score", type: "FLOAT", mode: "NULLABLE"}
+      - {name: "created_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
+    
+    # Schema for live incident predictions
+    incident_predictions:
+      - {name: "incident_id", type: "STRING", mode: "REQUIRED"}
+      - {name: "predicted_cluster_id", type: "INTEGER", mode: "REQUIRED"}
+      - {name: "predicted_cluster_label", type: "STRING", mode: "NULLABLE"}
+      - {name: "confidence_score", type: "FLOAT", mode: "NULLABLE"}
+      - {name: "predicted_domain_id", type: "INTEGER", mode: "NULLABLE"}
+      - {name: "predicted_domain_name", type: "STRING", mode: "NULLABLE"}
+      - {name: "tech_center", type: "STRING", mode: "REQUIRED"}
+      - {name: "prediction_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
+      - {name: "model_table_used", type: "STRING", mode: "NULLABLE"}
+      - {name: "blob_model_path", type: "STRING", mode: "NULLABLE"}
 
 # ===================================================================
 # TRAINING CONFIGURATION - CUMULATIVE APPROACH
