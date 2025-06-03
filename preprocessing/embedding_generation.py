@@ -34,6 +34,20 @@ class EmbeddingGenerator:
             "batch_failures": 0
         }
         
+        # Validation statistics
+        self.validation_stats = {
+            'total_processed': 0,
+            'valid_texts': 0,
+            'empty_texts': 0,
+            'too_long_texts': 0,
+            'too_short_texts': 0,
+            'api_failures': 0
+        }
+        
+        # Incident tracking
+        self.failed_incidents = {}
+        self.failure_reasons = {}
+        
         logging.info("Embedding generator initialized with Azure OpenAI")
     
     def _init_azure_client(self):
@@ -50,28 +64,83 @@ class EmbeddingGenerator:
         self.max_retries = azure_config.get('max_retries', 3)
         self.retry_delay = azure_config.get('retry_delay_seconds', 1)
     
+    def _validate_and_prepare_text(self, text: str, index: int) -> Optional[str]:
+        """
+        Validate and prepare text for embedding generation with comprehensive checks
+        """
+        self.validation_stats['total_processed'] += 1
+        
+        # Check if text is string and not empty
+        if not isinstance(text, str) or not text.strip():
+            self.failed_incidents[index] = "empty_or_invalid"
+            self.failure_reasons[index] = "Empty or non-string text"
+            self.validation_stats['empty_texts'] += 1
+            return None
+        
+        text = text.strip()
+        
+        # Check minimum length for meaningful embedding
+        if len(text) < self.min_text_length:
+            self.failed_incidents[index] = "too_short"
+            self.failure_reasons[index] = f"Text too short ({len(text)} chars < {self.min_text_length} minimum)"
+            self.validation_stats['too_short_texts'] += 1
+            return None
+        
+        # Estimate tokens (rough approximation: 1 token ≈ 4 characters)
+        estimated_tokens = len(text) // 4
+        if estimated_tokens == 0 and len(text) > 0:
+            estimated_tokens = 1
+        
+        # Handle texts that exceed token limit
+        if estimated_tokens > self.max_embedding_tokens:
+            logging.warning(
+                f"Text at index {index} too long ({estimated_tokens} tokens > {self.max_embedding_tokens} limit). Truncating."
+            )
+            # Truncate based on approximate character count to fit token limit
+            max_chars = self.max_embedding_tokens * 4
+            text = text[:max_chars].strip()
+            self.validation_stats['too_long_texts'] += 1
+        
+        self.validation_stats['valid_texts'] += 1
+        return text
+
     async def generate_embeddings_batch(self, texts: List[str], 
                                       batch_size: int = 50,
                                       use_batch_api: bool = True) -> Tuple[np.ndarray, List[int]]:
         """
-        Generate embeddings for a batch of texts using Azure OpenAI.
-        
-        Args:
-            texts: List of texts to embed
-            batch_size: Size of batches for API calls
-            use_batch_api: Whether to use batch embedding API
-            
-        Returns:
-            Tuple of (embeddings_array, valid_indices)
+        Generate embeddings for a batch of texts with enhanced validation and error handling
         """
         generation_start = datetime.now()
         
         logging.info("Generating embeddings for %d texts (batch_size=%d)", 
                     len(texts), batch_size)
         
+        # Reset validation stats for this batch
+        self.validation_stats = {
+            'total_processed': 0,
+            'valid_texts': 0,
+            'empty_texts': 0,
+            'too_long_texts': 0,
+            'too_short_texts': 0,
+            'api_failures': 0
+        }
+        
         try:
-            # Filter out empty/invalid texts
-            valid_texts, valid_indices = self._filter_valid_texts(texts)
+            # Validate and prepare texts
+            valid_texts = []
+            valid_indices = []
+            
+            for i, text in enumerate(texts):
+                validated_text = self._validate_and_prepare_text(text, i)
+                if validated_text is not None:
+                    valid_texts.append(validated_text)
+                    valid_indices.append(i)
+            
+            logging.info("Validated %d texts: %d valid, %d failed (%d empty, %d too_short, %d too_long)", 
+                        len(texts), len(valid_texts), len(self.failed_incidents),
+                        self.validation_stats['empty_texts'],
+                        self.validation_stats['too_short_texts'], 
+                        self.validation_stats['too_long_texts'])
             
             if len(valid_texts) == 0:
                 logging.warning("No valid texts found for embedding generation")
@@ -82,40 +151,40 @@ class EmbeddingGenerator:
             
             for i in range(0, len(valid_texts), batch_size):
                 batch_texts = valid_texts[i:i+batch_size]
-                batch_start_idx = i
+                batch_indices = valid_indices[i:i+batch_size]
                 
                 try:
-                    batch_embeddings = await self._generate_batch_embeddings(
-                        batch_texts, batch_start_idx
-                    )
+                    batch_embeddings = await self._generate_batch_with_retry(batch_texts, i)
                     
-                    if len(batch_embeddings) > 0:
+                    if len(batch_embeddings) == len(batch_texts):
                         all_embeddings.extend(batch_embeddings)
-                        self.generation_stats["batch_successes"] += 1
+                        logging.debug("Successfully processed batch %d (%d embeddings)", 
+                                    i // batch_size, len(batch_embeddings))
                     else:
-                        self.generation_stats["batch_failures"] += 1
-                        logging.warning("Batch %d failed to generate embeddings", 
-                                      batch_start_idx // batch_size)
+                        logging.warning("Batch %d: Expected %d embeddings, got %d", 
+                                      i // batch_size, len(batch_texts), len(batch_embeddings))
+                        # Still add partial results
+                        all_embeddings.extend(batch_embeddings)
                 
                 except Exception as e:
-                    logging.error("Batch %d embedding generation failed: %s", 
-                                batch_start_idx // batch_size, str(e))
-                    self.generation_stats["batch_failures"] += 1
+                    logging.error("Batch %d failed completely: %s", i // batch_size, str(e))
+                    self.validation_stats['api_failures'] += len(batch_texts)
+                    # Track failed incidents
+                    for idx in batch_indices:
+                        self.failed_incidents[idx] = "api_failure"
+                        self.failure_reasons[idx] = f"API failure: {str(e)}"
                     continue
             
-            # Convert to numpy array
+            # Convert to numpy array and return results
             if all_embeddings:
                 embeddings_array = np.array(all_embeddings)
                 
-                # Update statistics
                 generation_duration = datetime.now() - generation_start
-                self.generation_stats["total_embeddings_generated"] += len(embeddings_array)
-                self.generation_stats["total_processing_time"] += generation_duration.total_seconds()
+                logging.info("Generated %d embeddings in %.2f seconds (%.2f embeddings/sec)", 
+                           len(embeddings_array), generation_duration.total_seconds(),
+                           len(embeddings_array) / generation_duration.total_seconds())
                 
-                logging.info("Generated %d embeddings in %.2f seconds", 
-                           len(embeddings_array), generation_duration.total_seconds())
-                
-                return embeddings_array, valid_indices
+                return embeddings_array, valid_indices[:len(all_embeddings)]
             else:
                 logging.error("No embeddings generated successfully")
                 return np.array([]), []
@@ -123,7 +192,31 @@ class EmbeddingGenerator:
         except Exception as e:
             logging.error("Embedding generation failed: %s", str(e))
             return np.array([]), []
-    
+
+    async def _generate_batch_with_retry(self, texts: List[str], batch_start_idx: int) -> List[List[float]]:
+        """Generate embeddings for a batch with exponential backoff retry logic"""
+        for attempt in range(self.max_retries):
+            try:
+                response = await self.client.embeddings.create(
+                    input=texts,
+                    model=self.embedding_model
+                )
+                
+                embeddings = [data.embedding for data in response.data]
+                return embeddings
+                
+            except Exception as e:
+                wait_time = self.retry_delay * (2 ** attempt)
+                logging.warning("Batch %d attempt %d failed: %s. Waiting %.1f seconds", 
+                              batch_start_idx // 50, attempt + 1, str(e), wait_time)
+                
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+        
+        return []
+
     async def _generate_batch_embeddings(self, texts: List[str], 
                                        batch_start_idx: int) -> List[List[float]]:
         """Generate embeddings for a single batch"""
@@ -277,3 +370,15 @@ class EmbeddingGenerator:
             "batch_failures": 0
         }
         logging.info("Embedding generation statistics reset")
+    
+    def get_validation_report(self) -> Dict[str, Any]:
+        """Get comprehensive validation and processing report"""
+        return {
+            'validation_stats': self.validation_stats.copy(),
+            'failed_incidents': dict(self.failed_incidents),
+            'failure_reasons': dict(self.failure_reasons),
+            'success_rate': (
+                self.validation_stats['valid_texts'] / 
+                max(1, self.validation_stats['total_processed']) * 100
+            )
+        }

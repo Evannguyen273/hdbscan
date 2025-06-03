@@ -11,7 +11,7 @@ import hashlib
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound, Conflict
 
-from config.config import get_config
+from config.config import load_config
 
 class BigQueryClient:
     """
@@ -21,7 +21,7 @@ class BigQueryClient:
     
     def __init__(self, config=None):
         """Initialize BigQuery client with updated config system"""
-        self.config = config if config is not None else get_config()
+        self.config = config if config is not None else load_config()
         
         # Initialize BigQuery client
         self._init_bigquery_client()
@@ -181,62 +181,92 @@ class BigQueryClient:
             logging.error("Failed to create cluster results table for version %s: %s", version, str(e))
             return False
     
-    def _create_table_with_schema(self, table_id: str, schema: List, description: str) -> bool:
-        """Create table with given schema"""
+    def get_training_data_window(self, start_date: str, end_date: str, tech_centers: List[str]) -> pd.DataFrame:
+        """
+        Fetch training data for specified date window and tech centers using configurable query
+        """
         try:
+            # Get query template and table from configuration
+            query_template = self.config.bigquery.queries.training_data_window
+            source_table = self.config.bigquery.tables.incident_source
+            
+            query = query_template.format(
+                source_table=source_table,
+                start_date=start_date,
+                end_date=end_date
+            )
+            
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter("tech_centers", "STRING", tech_centers)
+                ]
+            )
+            
+            df = self.client.query(query, job_config=job_config).to_dataframe()
+            logging.info("Retrieved %d incidents for training window %s to %s", 
+                        len(df), start_date, end_date)
+            return df
+            
+        except Exception as e:
+            logging.error("Failed to fetch training data: %s", str(e))
+            raise
+    
+    def _create_table_with_schema(self, table_name: str, schema_fields: List[Dict]) -> bool:
+        """Create BigQuery table with schema from configuration"""
+        try:
+            table_id = f"{self.project_id}.{self.dataset_id}.{table_name}"
+            
+            # Convert schema dict to BigQuery schema fields
+            schema = []
+            for field in schema_fields:
+                schema.append(bigquery.SchemaField(
+                    field['name'], 
+                    field['type'], 
+                    mode=field.get('mode', 'NULLABLE'),
+                    fields=field.get('fields', [])
+                ))
+            
             try:
                 self.client.get_table(table_id)
-                logging.info("Table already exists: %s", table_id)
+                logging.info("Table already exists: %s", table_name)
                 return True
             except NotFound:
                 table = bigquery.Table(table_id, schema=schema)
-                table.description = description
-                
-                table = self.client.create_table(table, timeout=30)
-                
-                self.operation_stats["tables_created"] += 1
-                logging.info("Created table: %s", table_id)
+                table = self.client.create_table(table)
+                logging.info("Created table: %s", table_name)
                 return True
                 
         except Exception as e:
-            logging.error("Failed to create table %s: %s", table_id, str(e))
+            logging.error("Failed to create table %s: %s", table_name, str(e))
             return False
     
     def register_model_version(self, model_metadata: Dict[str, Any]) -> bool:
-        """Register a new model version in the registry"""
+        """Register model version using configurable insert query"""
         try:
-            table_id = f"{self.project_id}.{self.bq_config['dataset_id']}.{self.bq_config['model_registry_table']}"
+            # Get query template and table from configuration
+            query_template = self.config.bigquery.queries.model_registry_insert
+            table = self.config.bigquery.tables.model_registry
             
-            # Prepare row data
-            now = datetime.now()
-            row_data = {
-                "model_version": model_metadata["model_version"],
-                "model_hash": model_metadata["model_hash"],
-                "tech_center": model_metadata["tech_center"],
-                "training_date": model_metadata["training_date"],
-                "model_metadata": json.dumps(model_metadata.get("metadata", {})),
-                "performance_metrics": json.dumps(model_metadata.get("performance_metrics", {})),
-                "model_config": json.dumps(model_metadata.get("model_config", {})),
-                "data_window_start": model_metadata.get("data_window_start"),
-                "data_window_end": model_metadata.get("data_window_end"),
-                "incidents_count": model_metadata.get("incidents_count"),
-                "clusters_count": model_metadata.get("clusters_count"),
-                "model_status": model_metadata.get("model_status", "active"),
-                "created_at": now,
-                "updated_at": now
-            }
+            query = query_template.format(table=table)
             
-            # Insert row
-            errors = self.client.insert_rows_json(
-                self.client.get_table(table_id), [row_data]
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("model_version", "STRING", model_metadata["model_version"]),
+                    bigquery.ScalarQueryParameter("tech_center", "STRING", model_metadata["tech_center"]),
+                    bigquery.ScalarQueryParameter("model_type", "STRING", model_metadata["model_type"]),
+                    bigquery.ScalarQueryParameter("training_data_start", "DATE", model_metadata["training_data_start"]),
+                    bigquery.ScalarQueryParameter("training_data_end", "DATE", model_metadata["training_data_end"]),
+                    bigquery.ScalarQueryParameter("blob_path", "STRING", model_metadata["blob_path"]),
+                    bigquery.ScalarQueryParameter("created_timestamp", "TIMESTAMP", datetime.now()),
+                    bigquery.ScalarQueryParameter("model_params", "JSON", json.dumps(model_metadata.get("model_params", {})))
+                ]
             )
             
-            if errors:
-                logging.error("Failed to register model version: %s", errors)
-                return False
+            query_job = self.client.query(query, job_config=job_config)
+            query_job.result()  # Wait for completion
             
-            self.operation_stats["records_inserted"] += 1
-            logging.info("Registered model version: %s", model_metadata["model_version"])
+            logging.info("Registered model version: %s for tech center: %s", 
+                        model_metadata["model_version"], model_metadata["tech_center"])
             return True
             
         except Exception as e:
@@ -277,31 +307,22 @@ class BigQueryClient:
         except Exception as e:
             logging.error("Failed to get latest model version: %s", str(e))
             return None
-    
-    def get_training_data_window(self, tech_center: str, 
+      def get_training_data_window(self, tech_center: str, 
                                end_date: datetime, 
                                months_back: int = 24) -> pd.DataFrame:
-        """Get training data for a specific window"""
+        """Get training data for a specific window using configurable query"""
         try:
             start_date = end_date - timedelta(days=months_back * 30)
             
-            # This would query your actual incident data table
-            # Adjust table name and columns based on your schema
-            query = f"""
-            SELECT 
-                incident_id,
-                tech_center,
-                description,
-                created_date,
-                resolution_notes,
-                category,
-                subcategory
-            FROM `{self.project_id}.your_incident_table`
-            WHERE tech_center = @tech_center
-                AND created_date >= @start_date
-                AND created_date <= @end_date
-            ORDER BY created_date DESC
-            """
+            # Use configurable query template and table reference
+            query_template = self.config.bigquery.queries.training_data_window
+            source_table = self.config.bigquery.tables.incident_source
+            
+            query = query_template.format(
+                source_table=source_table,
+                start_date=start_date.isoformat(),
+                end_date=end_date.isoformat()
+            )
             
             job_config = bigquery.QueryJobConfig(
                 query_parameters=[
@@ -326,12 +347,12 @@ class BigQueryClient:
         except Exception as e:
             logging.error("Failed to get training data window: %s", str(e))
             return pd.DataFrame()
-    
-    def store_training_data(self, version: str, training_data: pd.DataFrame) -> bool:
+      def store_training_data(self, version: str, training_data: pd.DataFrame) -> bool:
         """Store training data for a version"""
         try:
-            table_name = f"{self.bq_config['training_data_table']}_{version}"
-            table_id = f"{self.project_id}.{self.bq_config['dataset_id']}.{table_name}"
+            # Use configuration-driven table references
+            table_name = f"{self.config.bigquery.tables.training_data}_{version}"
+            table_id = f"{self.config.bigquery.project_id}.{self.config.bigquery.dataset_id}.{table_name}"
             
             # Add created_at timestamp
             training_data = training_data.copy()
@@ -355,18 +376,21 @@ class BigQueryClient:
         except Exception as e:
             logging.error("Failed to store training data: %s", str(e))
             return False
-    
-    def store_cluster_results(self, version: str, cluster_results: List[Dict]) -> bool:
+      def store_cluster_results(self, version: str, cluster_results: List[Dict]) -> bool:
         """Store cluster results for a version"""
         try:
-            table_name = f"{self.bq_config['cluster_results_table']}_{version}"
-            table_id = f"{self.project_id}.{self.bq_config['dataset_id']}.{table_name}"
+            # Use configuration-driven table references
+            table_name = f"{self.config.bigquery.tables.cluster_results}_{version}"
+            table_id = f"{self.config.bigquery.project_id}.{self.config.bigquery.dataset_id}.{table_name}"
             
             # Add created_at timestamp to each result
             for result in cluster_results:
                 result['created_at'] = datetime.now()
             
-            # Insert data
+            # Insert data using proper table reference
+            errors = self.client.insert_rows_json(
+                self.client.get_table(table_id), cluster_results
+            )
             errors = self.client.insert_rows_json(
                 self.client.get_table(table_id), cluster_results
             )

@@ -68,9 +68,9 @@ class PredictionPipeline:
         # Initialize logger
         self.logger = logging.getLogger(__name__)
         
-        # Table references (updated for cost optimization)
-        self.preprocessed_table = config.bigquery.tables.preprocessed_incidents  # Contains embeddings
-        self.predictions_table = "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.incident_predictions"  # Results only
+        # Table references from configuration instead of hardcoded values
+        self.preprocessed_table = config.bigquery.tables.preprocessed_incidents
+        self.predictions_table = config.bigquery.tables.predictions
         
         self.logger.info("Prediction pipeline initialized with optimized storage architecture")
     
@@ -479,6 +479,80 @@ class PredictionPipeline:
         
         return predictions
     
+    async def _predict_incidents_improved(self, incidents: pd.DataFrame, models: Dict[str, Any], tech_center: str) -> List[Dict[str, Any]]:
+        """
+        YOUR IMPROVED APPROACH: Predict using combined model artifacts and domain mappings
+        """
+        self.logger.info(f"Starting improved prediction for {len(incidents)} incidents in {tech_center}")
+        
+        predictions = []
+        
+        for idx, incident in incidents.iterrows():
+            try:
+                # Process text and generate embeddings (existing logic)
+                processed_text = self.text_processor.process_incident_text(
+                    incident["description"], 
+                    incident["short_description"]
+                )
+                
+                # Generate embedding
+                embedding = self.embedding_generator.generate_single_embedding(processed_text)
+                
+                # Apply UMAP transformation using loaded model
+                umap_embedding = models["model_artifacts"]["umap_model"].transform([embedding])
+                
+                # Predict cluster using loaded HDBSCAN model - YOUR APPROACH
+                cluster_label = models["model_artifacts"]["hdbscan_model"].predict(umap_embedding)[0]
+                
+                # Get cluster metadata using YOUR COMBINED APPROACH
+                cluster_name = models.get("cluster_labels", {}).get(str(cluster_label), f"Cluster_{cluster_label}")
+                domain_info = models.get("domain_mappings", {}).get(str(cluster_label), {"domain_name": "Unknown"})
+                
+                # Calculate confidence score
+                confidence_score = self._calculate_confidence_score(
+                    umap_embedding[0], cluster_label, models["model_artifacts"]["hdbscan_model"]
+                )
+                
+                prediction = {
+                    "incident_id": incident["incident_id"],
+                    "tech_center": tech_center,
+                    "cluster_label": int(cluster_label),
+                    "cluster_name": cluster_name,
+                    "domain": domain_info.get("domain_name", "Unknown"),
+                    "confidence_score": float(confidence_score),
+                    "is_outlier": cluster_label == -1,
+                    "prediction_timestamp": datetime.now(),
+                    # Optional: consider not storing these in final prediction output for BQ cost optimization
+                    "embedding_vector": embedding.tolist() if self.config.prediction.store_embeddings else None,
+                    "umap_coordinates": umap_embedding[0].tolist() if self.config.prediction.store_coordinates else None,
+                    # YOUR KEY ADDITIONS for traceability
+                    "model_table_used": models.get("model_metadata", {}).get("training_results_table", "N/A"),
+                    "blob_model_path": models.get("model_artifacts", {}).get("blob_path", "N/A"),
+                    "model_hash": models.get("model_metadata", {}).get("model_hash", "N/A")
+                }
+                
+                predictions.append(prediction)
+                
+            except Exception as e:
+                self.logger.error(f"Failed to predict incident {incident['incident_id']}: {e}")
+                # Add failed prediction record
+                predictions.append({
+                    "incident_id": incident["incident_id"],
+                    "tech_center": tech_center,
+                    "cluster_label": -1,
+                    "cluster_name": "Prediction_Failed",
+                    "domain": "Error",
+                    "confidence_score": 0.0,
+                    "is_outlier": True,
+                    "prediction_timestamp": datetime.now(),
+                    "error_message": str(e),
+                    "model_table_used": models.get("model_metadata", {}).get("training_results_table", "N/A"),
+                    "model_hash": models.get("model_metadata", {}).get("model_hash", "N/A")
+                })
+        
+        self.logger.info(f"Completed predictions: {len([p for p in predictions if 'error_message' not in p])} successful, {len([p for p in predictions if 'error_message' in p])} failed")
+        return predictions
+    
     def _get_cluster_info(self, cluster_label: int, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
         Get cluster information from metadata
@@ -837,117 +911,145 @@ class PredictionPipeline:
         except Exception as e:
             self.logger.error(f"Failed to load models from blob storage and {model_table_name}: {e}")
             raise
-    
-    def _load_model_artifacts_from_blob(self, tech_center: str, model_year: int, model_quarter: str) -> Dict:
+      def _load_model_artifacts_from_blob(self, tech_center: str, model_year: int, model_quarter: str) -> Dict:
         """
-        Load UMAP and HDBSCAN model artifacts from Azure Blob Storage
+        REAL IMPLEMENTATION: Load UMAP and HDBSCAN model artifacts from Azure Blob Storage
         
         Blob Storage Path:
         hdbscan-models/{tech_center_folder}/{model_year}_{model_quarter}/
         ├── umap_model.pkl
-        ├── hdbscan_model.pkl
-        ├── umap_embeddings.npy
-        ├── cluster_labels.npy
+        ├── hdbscan_model.pkl  
+        ├── preprocessing_artifacts.pkl
         └── model_metadata.json
         """
         try:
-            container_name = "hdbscan-models"
+            import pickle
+            import io
+            from azure.storage.blob import BlobServiceClient
+            
+            # Get blob storage connection
+            connection_string = self.config.azure.blob_storage.connection_string
+            container_name = self.config.azure.blob_storage.container_name
+            
+            # Initialize blob client
+            blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+            container_client = blob_service_client.get_container_client(container_name)
+            
+            # Build blob paths based on tech center and version
             tech_center_folder = tech_center.replace(" ", "-").replace("_", "-").lower()
             model_version = f"{model_year}_{model_quarter}"
             blob_prefix = f"{tech_center_folder}/{model_version}/"
             
-            self.logger.info(f"Loading model artifacts from blob storage: {container_name}/{blob_prefix}")
+            self.logger.info(f"Loading model artifacts from blob: {container_name}/{blob_prefix}")
             
-            # In real implementation, use Azure Blob Storage SDK:
-            # blob_service_client = BlobServiceClient(...)
-            # 
-            # # Download UMAP model
-            # umap_blob = blob_service_client.get_blob_client(
-            #     container=container_name, blob=f"{blob_prefix}umap_model.pkl"
-            # )
-            # umap_data = umap_blob.download_blob().readall()
-            # umap_model = pickle.loads(umap_data)
-            # 
-            # # Download HDBSCAN model
-            # hdbscan_blob = blob_service_client.get_blob_client(
-            #     container=container_name, blob=f"{blob_prefix}hdbscan_model.pkl"
-            # )
-            # hdbscan_data = hdbscan_blob.download_blob().readall()
-            # hdbscan_model = pickle.loads(hdbscan_data)
-            # 
-            # # Download UMAP embeddings for centroid calculations
-            # embeddings_blob = blob_service_client.get_blob_client(
-            #     container=container_name, blob=f"{blob_prefix}umap_embeddings.npy"
-            # )
-            # embeddings_data = embeddings_blob.download_blob().readall()
-            # umap_embeddings = np.load(io.BytesIO(embeddings_data))
+            # Load UMAP model
+            umap_blob_name = f"{blob_prefix}umap_model.pkl"
+            umap_blob_client = container_client.get_blob_client(umap_blob_name)
+            umap_data = umap_blob_client.download_blob().readall()
+            umap_model = pickle.loads(umap_data)
             
-            # Mock model artifacts for demonstration
+            # Load HDBSCAN model
+            hdbscan_blob_name = f"{blob_prefix}hdbscan_model.pkl"
+            hdbscan_blob_client = container_client.get_blob_client(hdbscan_blob_name)
+            hdbscan_data = hdbscan_blob_client.download_blob().readall()
+            hdbscan_model = pickle.loads(hdbscan_data)
+            
+            # Load preprocessing artifacts
+            preprocessing_blob_name = f"{blob_prefix}preprocessing_artifacts.pkl"
+            preprocessing_blob_client = container_client.get_blob_client(preprocessing_blob_name)
+            preprocessing_data = preprocessing_blob_client.download_blob().readall()
+            preprocessing_artifacts = pickle.loads(preprocessing_data)
+            
+            # Load model metadata
+            metadata_blob_name = f"{blob_prefix}model_metadata.json"
+            metadata_blob_client = container_client.get_blob_client(metadata_blob_name)
+            metadata_data = metadata_blob_client.download_blob().readall()
+            model_metadata = json.loads(metadata_data.decode('utf-8'))
+            
             model_artifacts = {
-                "umap_model": "MockUMAPModel",  # In real: loaded pickle object
-                "hdbscan_model": "MockHDBSCANModel",  # In real: loaded pickle object
-                "umap_embeddings": np.random.rand(1000, 2),  # In real: loaded numpy array
+                "umap_model": umap_model,
+                "hdbscan_model": hdbscan_model,
+                "preprocessing_artifacts": preprocessing_artifacts,
+                "model_metadata": model_metadata,
                 "blob_path": f"{container_name}/{blob_prefix}",
                 "loaded_from": "blob_storage",
                 "model_version": model_version
             }
             
-            self.logger.info(f"Model artifacts loaded from blob storage: {blob_prefix}")
+            self.logger.info(f"Successfully loaded real model artifacts from {blob_prefix}")
             return model_artifacts
             
         except Exception as e:
             self.logger.error(f"Failed to load model artifacts from blob storage: {e}")
-            raise
-    
-    def _load_domain_mappings_from_bigquery(self, model_table_name: str, tech_center: str) -> Dict:
+            raise RuntimeError(f"Could not load model artifacts for {tech_center} {model_year}_{model_quarter}: {e}")    def _load_domain_mappings_from_bigquery(self, models: Dict[str, Any], tech_center: str) -> Dict:
         """
-        Load domain mappings and cluster metadata from versioned BigQuery table
-        
-        Query: SELECT DISTINCT cluster_id, cluster_label, domain_id, domain_name
-               FROM {model_table_name} WHERE tech_center = {tech_center}
+        REAL IMPLEMENTATION: Load domain mappings from versioned BigQuery table
+        Using YOUR APPROACH - get table name from model metadata
         """
         try:
-            self.logger.info(f"Loading domain mappings from BigQuery table: {model_table_name}")
+            # YOUR CRITICAL INSIGHT - get table name from model metadata
+            if not models or "model_metadata" not in models or "training_results_table" not in models["model_metadata"]:
+                self.logger.error(f"Cannot load domain mappings: training_results_table not found in model metadata for {tech_center}")
+                return {"cluster_labels": {}, "domain_mappings": {}}
             
-            # In real implementation, query BigQuery:
-            # query = f"""
-            # SELECT DISTINCT 
-            #     cluster_id, 
-            #     cluster_label, 
-            #     domain_id, 
-            #     domain_name,
-            #     domain_description
-            # FROM `{model_table_name}` 
-            # WHERE tech_center = '{tech_center}'
-            # ORDER BY cluster_id
-            # """
-            # 
-            # client = bigquery.Client()
-            # query_job = client.query(query)
-            # results = query_job.result()
+            actual_model_table_name = models["model_metadata"]["training_results_table"]
+            self.logger.info(f"Loading domain mappings from BigQuery table: {actual_model_table_name} for {tech_center}")
             
-            # Mock domain mappings based on versioned table
-            domain_mappings = {
-                "cluster_labels": {
-                    "0": f"Network Issues - {tech_center}",
-                    "1": f"Server Problems - {tech_center}",
-                    "2": f"Application Errors - {tech_center}",
-                    "3": f"Database Issues - {tech_center}",
-                    "4": f"Security Incidents - {tech_center}"
-                },
-                "domain_mappings": {
-                    "0": {"domain_id": 1, "domain_name": "Infrastructure", "confidence": 0.9},
-                    "1": {"domain_id": 1, "domain_name": "Infrastructure", "confidence": 0.9},
-                    "2": {"domain_id": 2, "domain_name": "Applications", "confidence": 0.85},
-                    "3": {"domain_id": 3, "domain_name": "Data Management", "confidence": 0.8},
-                    "4": {"domain_id": 4, "domain_name": "Security", "confidence": 0.95}
-                },
-                "table_source": model_table_name
+            # REAL IMPLEMENTATION using existing BigQuery client
+            query = f"""
+            SELECT DISTINCT 
+                cluster_id, 
+                cluster_label, 
+                domain_id, 
+                domain_name,
+                domain_description,
+                cluster_count,
+                incident_count
+            FROM `{self.config.bigquery.project_id}.{self.config.bigquery.dataset_id}.{actual_model_table_name}` 
+            WHERE tech_center = @tech_center
+            ORDER BY cluster_id
+            """
+            
+            # Execute query using existing BigQuery client
+            job_config = self.bigquery_client.create_query_job_config()
+            job_config.query_parameters = [
+                self.bigquery_client.bigquery.ScalarQueryParameter("tech_center", "STRING", tech_center)
+            ]
+            
+            results = self.bigquery_client.execute_query(query, job_config)
+            
+            # Process results into domain mappings
+            cluster_labels = {}
+            domain_mappings = {}
+            
+            for _, row in results.iterrows():
+                cluster_id = str(row['cluster_id'])
+                
+                # Store cluster label
+                cluster_labels[cluster_id] = row['cluster_label']
+                
+                # Store domain mapping
+                domain_mappings[cluster_id] = {
+                    "domain_id": row['domain_id'],
+                    "domain_name": row['domain_name'],
+                    "domain_description": row.get('domain_description', ''),
+                    "cluster_count": row.get('cluster_count', 0),
+                    "incident_count": row.get('incident_count', 0),
+                    "confidence": min(1.0, max(0.1, (row.get('incident_count', 1)) / 100.0))
+                }
+            
+            domain_data = {
+                "cluster_labels": cluster_labels,
+                "domain_mappings": domain_mappings,
+                "table_source": actual_model_table_name,
+                "tech_center": tech_center,
+                "total_clusters": len(cluster_labels),
+                "total_domains": len(set(dm["domain_id"] for dm in domain_mappings.values()))
             }
             
-            self.logger.info(f"Domain mappings loaded from {model_table_name}: {len(domain_mappings['cluster_labels'])} clusters")
-            return domain_mappings
+            self.logger.info(f"Loaded {len(cluster_labels)} cluster labels and {domain_data['total_domains']} domains from {actual_model_table_name}")
+            return domain_data
             
         except Exception as e:
-            self.logger.error(f"Failed to load domain mappings from {model_table_name}: {e}")
-            raise
+            self.logger.error(f"Failed to load domain mappings: {e}")
+            raise RuntimeError(f"Could not load domain mappings for {tech_center}: {e}")

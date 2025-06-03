@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import logging
 from dotenv import load_dotenv
+from pydantic import BaseModel, validator
 
 class Config:
     """Configuration manager for consolidated config.yaml"""
@@ -47,7 +48,7 @@ class Config:
         if main_config.exists():
             return str(main_config)
         raise FileNotFoundError("Configuration file not found: config.yaml")
-      def _load_config(self, config_path: str) -> Dict[str, Any]:
+    def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load YAML configuration file"""
         try:
             with open(config_path, 'r') as file:
@@ -159,63 +160,91 @@ class Config:
                 return tech_centers_config
         return []
 
-class BigQueryConfig:
-    """BigQuery configuration wrapper with versioned storage support"""
+class BigQueryTableConfig(BaseModel):
+    """Configuration for BigQuery tables with validation"""
+    incidents: str
+    team_services: str
+    problems: str
+    incident_source: str
+    preprocessed_incidents: str
+    training_results_template: str
+    training_data: str
+    predictions: str
+    model_registry: str
+    training_logs: str
+    watermarks: str
     
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-    
-    @property
-    def project_id(self) -> str:
-        return self.config.get('project_id', '')
-    
-    @property
-    def service_account_key_path(self):
-        return self.config.get('service_account_key_path', '')
-    
-    @property
-    def tables(self) -> Dict[str, str]:
-        return self.config.get('tables', {})
-    
-    def get_table_id(self, table_name: str) -> str:
-        """Get full table ID for a table name"""
-        return self.tables.get(table_name, '')
-    
-    def get_versioned_table_name(self, version: str, hash_suffix: str) -> str:
-        """Get versioned table name for training results"""
-        template = self.tables.get('training_results_template', 'clustering_predictions_{version}_{hash}')
-        return template.format(version=version, hash=hash_suffix)
-    
-    @property
-    def predictions_table(self) -> str:
-        """Get predictions table name"""
-        return self.tables.get('predictions', 'incident_predictions')
-    
-    @property
-    def model_registry_table(self) -> str:
-        """Get model registry table name"""
-        return self.tables.get('model_registry', 'model_registry')
-    
-    @property
-    def preprocessed_incidents_table(self) -> str:
-        """Get preprocessed incidents table name"""
-        return self.tables.get('preprocessed_incidents', 'preprocessed_incidents')
+    @validator('*')
+    def validate_table_names(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Table name cannot be empty")
+        return v
 
-class AzureConfig:
-    """Azure configuration wrapper"""
+class BigQueryQueriesConfig(BaseModel):
+    """Configuration for BigQuery SQL queries"""
+    training_data_window: str
+    model_registry_insert: str
+    cluster_results_insert: str
     
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
+    @validator('*')
+    def validate_queries(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Query template cannot be empty")
+        return v
+
+class BigQueryConfig(BaseModel):
+    """BigQuery configuration with validation"""
+    project_id: str
+    service_account_key_path: str
+    tables: BigQueryTableConfig
+    queries: BigQueryQueriesConfig
+    schemas: Dict[str, List[Dict]]
     
-    @property
-    def openai(self):
-        """Get OpenAI configuration"""
-        return self.config.get('openai', {})
+    @validator('project_id')
+    def validate_project_id(cls, v):
+        if not v or not v.strip():
+            raise ValueError("BigQuery project_id cannot be empty")
+        return v
+
+class AzureOpenAIConfig(BaseModel):
+    """Azure OpenAI configuration with validation"""
+    endpoint: str
+    api_key: str
+    api_version: str
+    deployment_name: str
+    embedding_endpoint: str
+    embedding_api_version: str
+    embedding_key: str
+    embedding_model: str
     
-    @property
-    def blob_storage(self):
-        """Get blob storage configuration"""
-        return self.config.get('blob_storage', {})
+    @validator('endpoint', 'embedding_endpoint')
+    def validate_endpoints(cls, v):
+        if not v or not v.startswith('https://'):
+            raise ValueError("Endpoint must be a valid HTTPS URL")
+        return v
+
+class AzureBlobConfig(BaseModel):
+    """Azure Blob Storage configuration"""
+    connection_string: str
+    container_name: str
+    structure: Dict[str, str]
+
+class AzureConfig(BaseModel):
+    """Azure configuration container"""
+    openai: AzureOpenAIConfig
+    blob_storage: AzureBlobConfig
+
+class ValidationConfig(BaseModel):
+    """Text validation configuration"""
+    max_embedding_tokens: int = 8191
+    min_text_length: int = 10
+    max_text_length: int = 32000
+    
+    @validator('max_embedding_tokens')
+    def validate_token_limit(cls, v):
+        if v <= 0:
+            raise ValueError("max_embedding_tokens must be positive")
+        return v
 
 class ClusteringConfig:
     """Clustering configuration wrapper"""

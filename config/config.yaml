@@ -50,21 +50,77 @@ bigquery:
     team_services: ${TEAM_SERVICES_TABLE}
     problems: ${PROBLEM_TABLE}
     
+    # Source table for training data (was hardcoded in bigquery_client.py)
+    incident_source: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.your_incident_table"
+    
     # Pipeline tables - HYBRID STORAGE ARCHITECTURE
     preprocessed_incidents: "preprocessing_pipeline.preprocessed_incidents"
     # ^ Contains: embeddings, summaries, metadata (HIGH cost but necessary)
     
     # Versioned training results (NO embeddings for cost optimization)
     training_results_template: "clustering_predictions_{version}_{hash}"
+    training_data: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.training_data"
     # ^ Example: clustering_predictions_2025_q2_789abc12
     
     # Live predictions (NO embeddings)
-    predictions: "incident_predictions"
+    predictions: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.incident_predictions"
     
     # Model tracking
-    model_registry: "model_registry"
+    model_registry: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.model_registry"
     training_logs: "training_logs"
     watermarks: "preprocessing_pipeline.preprocessing_watermarks"
+
+  # SQL Query templates to eliminate hardcoded queries
+  queries:
+    training_data_window: |
+      SELECT incident_number, description, created_date, tech_center
+      FROM `{source_table}`
+      WHERE created_date >= '{start_date}' 
+      AND created_date < '{end_date}'
+      AND tech_center IN UNNEST(@tech_centers)
+    
+    model_registry_insert: |
+      INSERT INTO `{table}` (model_version, tech_center, model_type, training_data_start, 
+                            training_data_end, blob_path, created_timestamp, model_params)
+      VALUES (@model_version, @tech_center, @model_type, @training_data_start, 
+              @training_data_end, @blob_path, @created_timestamp, @model_params)
+    
+    cluster_results_insert: |
+      INSERT INTO `{table}` (incident_number, tech_center, cluster_id, confidence_score, 
+                            model_version, prediction_timestamp, domain_group)
+      VALUES (@incident_number, @tech_center, @cluster_id, @confidence_score, 
+              @model_version, @prediction_timestamp, @domain_group)
+
+  # Schema definitions for table creation
+  schemas:
+    model_registry:
+      - {name: "model_version", type: "STRING", mode: "REQUIRED"}
+      - {name: "tech_center", type: "STRING", mode: "REQUIRED"}
+      - {name: "model_type", type: "STRING", mode: "REQUIRED"}
+      - {name: "training_data_start", type: "DATE", mode: "REQUIRED"}
+      - {name: "training_data_end", type: "DATE", mode: "REQUIRED"}
+      - {name: "blob_path", type: "STRING", mode: "REQUIRED"}
+      - {name: "created_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
+      - {name: "model_params", type: "JSON", mode: "NULLABLE"}
+      - {name: "cluster_count", type: "INTEGER", mode: "NULLABLE"}
+      - {name: "silhouette_score", type: "FLOAT", mode: "NULLABLE"}
+    
+    training_data:
+      - {name: "incident_number", type: "STRING", mode: "REQUIRED"}
+      - {name: "tech_center", type: "STRING", mode: "REQUIRED"}
+      - {name: "description_summary", type: "STRING", mode: "NULLABLE"}
+      - {name: "embedding", type: "REPEATED", mode: "NULLABLE", fields: [{name: "value", type: "FLOAT"}]}
+      - {name: "training_version", type: "STRING", mode: "REQUIRED"}
+      - {name: "created_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
+    
+    cluster_results:
+      - {name: "incident_number", type: "STRING", mode: "REQUIRED"}
+      - {name: "tech_center", type: "STRING", mode: "REQUIRED"}
+      - {name: "cluster_id", type: "INTEGER", mode: "REQUIRED"}
+      - {name: "confidence_score", type: "FLOAT", mode: "NULLABLE"}
+      - {name: "model_version", type: "STRING", mode: "REQUIRED"}
+      - {name: "prediction_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
+      - {name: "domain_group", type: "STRING", mode: "NULLABLE"}
 
 # ===================================================================
 # TRAINING CONFIGURATION - CUMULATIVE APPROACH
