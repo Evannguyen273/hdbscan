@@ -54,6 +54,13 @@ WHAT THIS STEP DOES IN PRODUCTION:
    - Handles errors and retries for API failures
    - Returns processed data ready for clustering
 
+3. VERSIONED MODEL STORAGE:
+   training_results = await training_pipeline.store_training_results(...)
+   
+   - Saves trained models to Azure Blob Storage (hdbscan-models/bt-tc-data-analytics/2025_q2/)
+   - Creates versioned BigQuery table (clustering_predictions_2025_q2_789)
+   - Links blob storage path with BigQuery metadata for predictions
+
 DATA FLOW:
 ================================================================================
 
@@ -150,6 +157,6 @@ Input:  BigQuery table with 1,247 incidents for "BT-TC-Network Operations" in 20
         ↓
         HDBSCAN clustering: 8 clusters identified
         ↓
-Output: Trained model stored in Azure Blob + BigQuery registry updated
+Output: Trained model stored in Azure Blob + versioned BigQuery table created
 
 This step is the foundation of the entire training pipeline!

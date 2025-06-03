@@ -4,15 +4,15 @@ A production-ready, configuration-driven HDBSCAN clustering pipeline for automat
 
 ## 🚀 Overview
 
-The pipeline implements a complete MLOps workflow for incident clustering with **enterprise-grade configuration management** and **robust validation systems**:
+The pipeline implements a complete MLOps workflow for incident clustering with **versioned model storage** and **hybrid cloud architecture**:
 
-1. **Data Preprocessing** - Text cleaning, validation, and normalization with comprehensive error handling
-2. **Embedding Generation** - Azure OpenAI embeddings with token optimization and batch processing  
-3. **Dimensionality Reduction** - UMAP transformation for visualization and clustering preparation
-4. **Clustering** - HDBSCAN clustering with automatic parameter tuning and validation
-5. **Model Versioning** - Comprehensive model registry with BigQuery + Azure Blob Storage
-6. **Real-time Prediction** - Production-ready prediction pipeline with model caching
-7. **Configuration Management** - Schema-validated, environment-agnostic configuration system
+1. **Data Preprocessing** - Text cleaning, validation, and Azure OpenAI embedding generation
+2. **Cumulative Training** - 24-month rolling window HDBSCAN training with versioned BigQuery storage
+3. **Model Artifacts Storage** - Azure Blob Storage for trained models (UMAP + HDBSCAN)
+4. **Versioned Domain Mappings** - BigQuery tables like `clustering_predictions_2025_q2_789` 
+5. **Real-time Prediction** - Loads models from Blob Storage + domain mappings from versioned BigQuery
+6. **Configuration Management** - Schema-validated, environment-agnostic configuration system
+7. **Production Deployment** - Semi-annual training with 2-hourly predictions
 
 ### ✨ Key Features
 
@@ -121,11 +121,14 @@ python -m pipeline.training_pipeline --tech-center "BT-TC-Data Analytics" --year
 
 #### **Real-time Predictions**
 ```bash
-# Run prediction pipeline
+# Run versioned prediction pipeline (loads from Azure Blob + BigQuery)
 python -m pipeline.prediction_pipeline --mode continuous
 
-# Single prediction
-python -m pipeline.prediction_pipeline --incident-id INC123456 --tech-center "BT-TC-Data Analytics"
+# Single prediction using specific model version
+python -m pipeline.prediction_pipeline --incident-id INC123456 --tech-center "BT-TC-Data Analytics" --model-year 2025 --model-quarter q2
+
+# Batch predictions with versioned models
+python main.py predict --tech-center "BT-TC-Security Operations" --model-year 2025 --model-quarter q2
 ```
 
 ### 4. Validation & Testing
@@ -268,10 +271,9 @@ class ClusterResultSchema(BaseModel):
 |-------|---------|-------------|------------------|
 | `incident_source` | Raw ServiceNow data | Medium | Real-time |
 | `preprocessed_incidents` | Processed with embeddings | High | Hourly |
-| `predictions` | Classification results | Low | Real-time |
-| `model_registry` | Model metadata | Low | On training |
-| `training_data` | Versioned training sets | Medium | Quarterly |
-| `cluster_results` | Cluster analysis | Low | Quarterly |
+| `clustering_predictions_{year}_{quarter}_{hash}` | Versioned training results | Low | Semi-annual |
+| `incident_predictions` | Live classification results | Low | Real-time |
+| `model_registry` | Model metadata & links | Low | Semi-annual |
 
 ### Azure Blob Storage Structure
 
@@ -283,11 +285,11 @@ hdbscan-models/
 │   │   ├── hdbscan_model.pkl
 │   │   ├── preprocessing_artifacts.pkl
 │   │   └── model_metadata.json
-│   └── 2025_q1/
+│   └── 2025_q2/
 │       └── ...
-└── model_registry/
-    ├── deployment_history.json
-    └── performance_metrics.json
+└── bt-tc-network-operations/
+    ├── 2024_q4/
+    └── 2025_q2/
 ```
 
 ## 🔍 Validation & Quality Assurance
@@ -366,14 +368,15 @@ from storage.model_registry import ModelRegistry
 
 registry = ModelRegistry()
 
-# Register new model version
+# Register new model version with training results table link
 model_metadata = {
-    "model_version": "2024_q4_v1",
+    "model_version": "2025_q2_v1",
     "tech_center": "BT-TC-Data Analytics", 
-    "training_data_start": "2023-01-01",
-    "training_data_end": "2024-12-31",
+    "training_data_start": "2023-07-01",
+    "training_data_end": "2025-06-30",
     "performance_metrics": {"silhouette_score": 0.67, "cluster_count": 12},
-    "blob_path": "bt-tc-data-analytics/2024_q4/"
+    "blob_path": "bt-tc-data-analytics/2025_q2/",
+    "training_results_table": "clustering_predictions_2025_q2_789"  # NEW: Link to versioned table
 }
 
 registry.register_model(model_metadata)

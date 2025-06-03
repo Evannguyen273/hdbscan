@@ -12,6 +12,7 @@ This document summarizes the critical fixes implemented to address the technical
 - Centralized SQL query templates in `bigquery.queries` section
 - Added schema definitions for BigQuery table creation
 - All hardcoded values now reference configuration
+- **NEW**: Added versioned table templates for `clustering_predictions_{year}_{quarter}_{hash}`
 
 **Impact**: Eliminates hardcoded dependencies, enables environment-specific configuration
 
@@ -23,8 +24,20 @@ This document summarizes the critical fixes implemented to address the technical
 - Enhanced error handling with detailed validation messages
 - Improved environment variable substitution
 - Better backward compatibility support
+- **NEW**: Support for versioned model storage paths and BigQuery table templates
 
 **Impact**: More robust configuration loading with clear error messages
+
+### 3. Versioned Model Storage Architecture (`training_pipeline.py`)
+**Issue**: No versioned storage strategy for training results and model artifacts.
+
+**Fix**:
+- Implemented `_store_training_results()` method with versioned BigQuery table creation
+- Added real Azure Blob Storage integration for model artifacts
+- Created model hash generation for unique table versioning
+- Linked blob storage paths with BigQuery metadata for complete traceability
+
+**Impact**: Production-ready model versioning with full audit trail
 
 ### 3. Schema Definitions (`config/schemas.py`)
 **Issue**: No formal schema validation for data structures.
@@ -67,8 +80,11 @@ This document summarizes the critical fixes implemented to address the technical
 - Replaced hardcoded table references with configuration-based ones
 - Fixed table name access pattern for consistency
 - Simplified prediction pipeline architecture
+- **NEW**: Implemented versioned model loading from Azure Blob Storage
+- **NEW**: Added domain mapping loading from versioned BigQuery tables
+- **NEW**: Created hybrid prediction strategy (blob models + BigQuery mappings)
 
-**Impact**: Cleaner code, configuration-driven table access
+**Impact**: Cleaner code, configuration-driven table access, production-ready versioned predictions
 
 ### 7. Test Infrastructure (`tests/test_config.py`)
 **Issue**: No testing framework for configuration validation.
@@ -95,6 +111,10 @@ This document summarizes the critical fixes implemented to address the technical
 ### Consolidated Processing
 - **Before**: Duplicate embedding logic in multiple files
 - **After**: Single, robust `EmbeddingGenerator` with comprehensive validation
+
+### Versioned Model Storage
+- **Before**: No model versioning strategy
+- **After**: Azure Blob Storage + versioned BigQuery tables with hash-based unique naming
 
 ### Test Coverage
 - **Before**: No configuration testing

@@ -16,7 +16,7 @@ class TrainingPipeline:
     Training pipeline for cumulative HDBSCAN approach with versioned storage.
     Handles domain grouping and model versioning.
     """
-      def __init__(self, config=None):
+    def __init__(self, config=None):
         """Initialize training pipeline with updated config system"""
         self.config = config if config is not None else get_config()
         

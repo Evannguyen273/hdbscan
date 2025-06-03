@@ -121,7 +121,7 @@ New Incidents → Load Models (Blob) → Load Mappings (BigQuery) → Generate P
 
 **Storage Location**:
 - **BigQuery Table**: `incident_predictions`
-- **Contents**: `incident_id`, `predicted_cluster_id`, `predicted_cluster_label`, `confidence_score`, `predicted_domain_id`, `predicted_domain_name`, `domain_confidence`, `tech_center`, `prediction_timestamp`, `model_table_used`
+- **Contents**: `incident_id`, `predicted_cluster_id`, `predicted_cluster_label`, `confidence_score`, `predicted_domain_id`, `predicted_domain_name`, `tech_center`, `prediction_timestamp`, `model_table_used`, `blob_model_path`
 - **Storage Cost**: **LOW** (no embeddings)
 
 **Key Files**:
