@@ -47,12 +47,19 @@ class Config:
         main_config = config_dir / 'config.yaml'
         if main_config.exists():
             return str(main_config)
-        raise FileNotFoundError("Configuration file not found: config.yaml")
-    def _load_config(self, config_path: str) -> Dict[str, Any]:
+        raise FileNotFoundError("Configuration file not found: config.yaml")    def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load YAML configuration file"""
         try:
             with open(config_path, 'r') as file:
-                return yaml.safe_load(file)
+                config_data = yaml.safe_load(file)
+            
+            # Apply environment-specific overrides FIRST
+            config_data = self._apply_environment_overrides(config_data)
+            
+            # Then apply environment variable substitution
+            config_data = self._substitute_env_vars(config_data)
+            
+            return config_data
         except Exception as e:
             raise ValueError(f"Failed to load configuration from {config_path}: {e}")
     
@@ -189,6 +196,40 @@ class Config:
     def logging_config(self):
         """Get logging configuration"""
         return LoggingConfig(**self.config.get('logging', {}))
+
+    def _apply_environment_overrides(self, config_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply environment-specific overrides from the 'environments' section"""
+        # Get current environment from config or environment variable
+        current_env = (
+            config_data.get('global', {}).get('environment') or 
+            os.environ.get('APP_ENV', 'development')
+        )
+        
+        environments_config = config_data.get('environments', {})
+        
+        if current_env not in environments_config:
+            logging.info("No environment overrides found for '%s'. Using base config.", current_env)
+            return config_data
+        
+        env_overrides = environments_config[current_env]
+        logging.info("Applying environment overrides for: '%s'", current_env)
+        
+        # Deep merge overrides
+        def deep_merge(base: Dict, override: Dict) -> Dict:
+            result = base.copy()
+            for key, value in override.items():
+                if isinstance(value, dict) and isinstance(result.get(key), dict):
+                    result[key] = deep_merge(result[key], value)
+                else:
+                    result[key] = value
+            return result
+        
+        merged_config = deep_merge(config_data, env_overrides)
+        
+        # Remove environments section from final config
+        merged_config.pop('environments', None)
+        
+        return merged_config
 
 class BigQueryTableConfig(BaseModel):
     """Configuration for BigQuery tables with validation"""
