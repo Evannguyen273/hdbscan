@@ -118,10 +118,10 @@ class BigQueryClient:
                 bigquery.SchemaField("clusters_count", "INTEGER", mode="NULLABLE"),
                 bigquery.SchemaField("model_status", "STRING", mode="REQUIRED"),
                 bigquery.SchemaField("created_at", "TIMESTAMP", mode="REQUIRED"),
-                bigquery.SchemaField("updated_at", "TIMESTAMP", mode="REQUIRED")
-            ]
+                bigquery.SchemaField("updated_at", "TIMESTAMP", mode="REQUIRED")            ]
             
-            return self._create_table_with_schema(table_id, schema, "Model registry for HDBSCAN clustering")
+            table_id = f"{self.project_id}.{self.bq_config['dataset_id']}.{self.bq_config['model_registry_table']}"
+            return self._create_table_with_schema(table_id, schema)
             
         except Exception as e:
             logging.error("Failed to create model registry table: %s", str(e))
@@ -143,12 +143,9 @@ class BigQueryClient:
                 bigquery.SchemaField("cluster_probability", "FLOAT", mode="NULLABLE"),
                 bigquery.SchemaField("domain", "STRING", mode="NULLABLE"),
                 bigquery.SchemaField("incident_date", "TIMESTAMP", mode="NULLABLE"),
-                bigquery.SchemaField("created_at", "TIMESTAMP", mode="REQUIRED")
-            ]
+                bigquery.SchemaField("created_at", "TIMESTAMP", mode="REQUIRED")            ]
             
-            return self._create_table_with_schema(
-                table_id, schema, f"Training data for version {version}"
-            )
+            return self._create_table_with_schema(table_id, schema)
             
         except Exception as e:
             logging.error("Failed to create training data table for version %s: %s", version, str(e))
@@ -172,10 +169,7 @@ class BigQueryClient:
                 bigquery.SchemaField("quality_score", "FLOAT", mode="NULLABLE"),
                 bigquery.SchemaField("created_at", "TIMESTAMP", mode="REQUIRED")
             ]
-            
-            return self._create_table_with_schema(
-                table_id, schema, f"Cluster results for version {version}"
-            )
+            return self._create_table_with_schema(table_id, schema)
             
         except Exception as e:
             logging.error("Failed to create cluster results table for version %s: %s", version, str(e))
@@ -294,7 +288,6 @@ class BigQueryClient:
             query_start = datetime.now()
             query_job = self.client.query(query, job_config=job_config)
             result = query_job.result()
-            
             query_duration = datetime.now() - query_start
             self.operation_stats["queries_executed"] += 1
             self.operation_stats["total_query_time"] += query_duration.total_seconds()
@@ -307,7 +300,8 @@ class BigQueryClient:
         except Exception as e:
             logging.error("Failed to get latest model version: %s", str(e))
             return None
-      def get_training_data_window(self, tech_center: str, 
+    
+    def get_training_data_window(self, tech_center: str, 
                                end_date: datetime, 
                                months_back: int = 24) -> pd.DataFrame:
         """Get training data for a specific window using configurable query"""
@@ -347,7 +341,8 @@ class BigQueryClient:
         except Exception as e:
             logging.error("Failed to get training data window: %s", str(e))
             return pd.DataFrame()
-      def store_training_data(self, version: str, training_data: pd.DataFrame) -> bool:
+    
+    def store_training_data(self, version: str, training_data: pd.DataFrame) -> bool:
         """Store training data for a version"""
         try:
             # Use configuration-driven table references
@@ -357,13 +352,11 @@ class BigQueryClient:
             # Add created_at timestamp
             training_data = training_data.copy()
             training_data['created_at'] = datetime.now()
-            
-            # Load data to BigQuery
+              # Load data to BigQuery
             job_config = bigquery.LoadJobConfig(
                 write_disposition="WRITE_TRUNCATE",  # Replace table contents
                 schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
             )
-            
             job = self.client.load_table_from_dataframe(
                 training_data, table_id, job_config=job_config
             )
@@ -376,21 +369,18 @@ class BigQueryClient:
         except Exception as e:
             logging.error("Failed to store training data: %s", str(e))
             return False
-      def store_cluster_results(self, version: str, cluster_results: List[Dict]) -> bool:
+    
+    def store_cluster_results(self, version: str, cluster_results: List[Dict]) -> bool:
         """Store cluster results for a version"""
         try:
             # Use configuration-driven table references
             table_name = f"{self.config.bigquery.tables.cluster_results}_{version}"
             table_id = f"{self.config.bigquery.project_id}.{self.config.bigquery.dataset_id}.{table_name}"
-            
-            # Add created_at timestamp to each result
+              # Add created_at timestamp to each result
             for result in cluster_results:
                 result['created_at'] = datetime.now()
             
             # Insert data using proper table reference
-            errors = self.client.insert_rows_json(
-                self.client.get_table(table_id), cluster_results
-            )
             errors = self.client.insert_rows_json(
                 self.client.get_table(table_id), cluster_results
             )
@@ -598,14 +588,13 @@ class BigQueryClient:
         except Exception as e:
             logging.error("Failed to update watermark: %s", str(e))
             return False
-    
-    async def create_operational_tables(self) -> bool:
+      async def create_operational_tables(self) -> bool:
         """Create operational tables (training_logs, watermarks) if they don't exist"""
         try:
             # Create training_logs table
             training_logs_schema = self.config.bigquery.schemas.get('training_logs', [])
             if training_logs_schema:
-                training_logs_success = self.create_table_if_not_exists(
+                training_logs_success = self._create_table_with_schema(
                     self.config.bigquery.tables.training_logs,
                     training_logs_schema
                 )
@@ -616,7 +605,7 @@ class BigQueryClient:
             # Create watermarks table
             watermarks_schema = self.config.bigquery.schemas.get('watermarks', [])
             if watermarks_schema:
-                watermarks_success = self.create_table_if_not_exists(
+                watermarks_success = self._create_table_with_schema(
                     self.config.bigquery.tables.watermarks,
                     watermarks_schema
                 )

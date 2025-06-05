@@ -3,7 +3,7 @@ Schema definitions for HDBSCAN Pipeline
 Provides Pydantic models for data validation and documentation
 """
 
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -16,14 +16,18 @@ class IncidentSchema(BaseModel):
     embedding: Optional[List[float]] = None
     summary: Optional[str] = None
     
-    @validator('incident_number')
+    @field_validator('incident_number')
+    @classmethod
     def validate_incident_number(cls, v):
+        """Validate incident number is not empty and strip whitespace"""
         if not v or not v.strip():
             raise ValueError("Incident number cannot be empty")
         return v.strip()
     
-    @validator('description')
+    @field_validator('description')
+    @classmethod
     def validate_description(cls, v):
+        """Validate description has minimum length and strip whitespace"""
         if not v or len(v.strip()) < 10:
             raise ValueError("Description must be at least 10 characters")
         return v.strip()
@@ -37,8 +41,10 @@ class PreprocessedIncidentSchema(BaseModel):
     preprocessing_version: str
     created_timestamp: datetime
     
-    @validator('embedding')
+    @field_validator('embedding')
+    @classmethod
     def validate_embedding(cls, v):
+        """Validate embedding is not empty and contains only numeric values"""
         if not v or len(v) == 0:
             raise ValueError("Embedding cannot be empty")
         if not all(isinstance(x, (int, float)) for x in v):
@@ -64,8 +70,10 @@ class ClusterResultSchema(BaseModel):
     prediction_timestamp: datetime
     domain_group: Optional[str] = None
     
-    @validator('cluster_id')
+    @field_validator('cluster_id')
+    @classmethod
     def validate_cluster_id(cls, v):
+        """Validate cluster ID is >= -1 (HDBSCAN allows -1 for noise clusters)"""
         if v < -1:  # -1 is noise cluster in HDBSCAN
             raise ValueError("Cluster ID must be >= -1")
         return v
@@ -80,8 +88,10 @@ class PredictionResultSchema(BaseModel):
     prediction_timestamp: datetime
     domain_group: Optional[str] = None
     
-    @validator('confidence_score')
+    @field_validator('confidence_score')
+    @classmethod
     def validate_confidence(cls, v):
+        """Validate confidence score is between 0 and 1"""
         if not 0.0 <= v <= 1.0:
             raise ValueError("Confidence score must be between 0 and 1")
         return v
@@ -99,8 +109,10 @@ class ModelRegistrySchema(BaseModel):
     cluster_count: Optional[int] = None
     silhouette_score: Optional[float] = None
     
-    @validator('model_type')
+    @field_validator('model_type')
+    @classmethod
     def validate_model_type(cls, v):
+        """Validate model type is one of the allowed types"""
         allowed_types = ['hdbscan', 'umap', 'domain_grouper', 'preprocessor']
         if v not in allowed_types:
             raise ValueError(f"Model type must be one of: {allowed_types}")
@@ -118,8 +130,10 @@ class ModelMetricsSchema(BaseModel):
     training_incidents_count: int
     training_duration_seconds: float
     
-    @validator('noise_ratio')
+    @field_validator('noise_ratio')
+    @classmethod
     def validate_noise_ratio(cls, v):
+        """Validate noise ratio is between 0 and 1"""
         if not 0.0 <= v <= 1.0:
             raise ValueError("Noise ratio must be between 0 and 1")
         return v
@@ -141,9 +155,11 @@ class EmbeddingBatchSchema(BaseModel):
     failed_count: int
     processing_timestamp: datetime
     
-    @validator('valid_count', 'failed_count')
-    def validate_counts(cls, v, values):
-        if 'total_count' in values and v > values['total_count']:
+    @field_validator('valid_count', 'failed_count')
+    @classmethod
+    def validate_counts(cls, v, info):
+        """Validate that counts do not exceed total count"""
+        if info.data and 'total_count' in info.data and v > info.data['total_count']:
             raise ValueError("Count cannot exceed total count")
         return v
 

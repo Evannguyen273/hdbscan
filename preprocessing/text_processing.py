@@ -475,15 +475,15 @@ class TextProcessor:
                     
                     if len(cleaned_text.strip()) > 0:
                         text_parts.append(cleaned_text)
-            
-            # Combine all parts with separator
+              # Combine all parts with separator
             if text_parts:
                 combined_text = " | ".join(text_parts)
                 combined_texts.append(combined_text)
             else:
                 # Handle case where no valid text found
                 combined_texts.append("No description available")
-          logging.debug("Combined %d incident texts from columns: %s", 
+        
+        logging.debug("Combined %d incident texts from columns: %s", 
                      len(combined_texts), text_columns)
         return combined_texts
     
@@ -531,9 +531,9 @@ Incident Details:
         for i in range(0, len(text), chunk_size):
             chunk = text[i:i + chunk_size]
             chunks.append(chunk)
+          logging.info(f"Split large text into {len(chunks)} chunks for processing")
         
-        logging.info(f"Split large text into {len(chunks)} chunks for processing")
-          if len(chunks) == 1:
+        if len(chunks) == 1:
             # Single chunk, process directly without recursion
             chunk_text = chunks[0]
             prompt = f"""Summarize the following incident in exactly {max_words} words.
