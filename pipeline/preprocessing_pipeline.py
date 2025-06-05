@@ -123,18 +123,25 @@ class PreprocessingPipeline:
         except Exception as e:
             logging.error("Preprocessing for prediction failed: %s", str(e))
             raise
-    
-    def _group_by_tech_center(self, dataset: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-        """Group dataset by tech center"""
+      def _group_by_tech_center(self, dataset: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+        """Group dataset by tech center or create single group if no tech_center column"""
         tech_center_data = {}
         
-        for tech_center in self.config.tech_centers:
-            tc_data = dataset[dataset['tech_center'] == tech_center].copy()
-            if len(tc_data) > 0:
-                tech_center_data[tech_center] = tc_data
-                logging.info("Tech center %s: %d incidents", tech_center, len(tc_data))
-            else:
-                logging.warning("No data found for tech center: %s", tech_center)
+        # Check if tech_center column exists
+        if 'tech_center' in dataset.columns:
+            # Group by existing tech_center column
+            for tech_center in self.config.tech_centers:
+                tc_data = dataset[dataset['tech_center'] == tech_center].copy()
+                if len(tc_data) > 0:
+                    tech_center_data[tech_center] = tc_data
+                    logging.info("Tech center %s: %d incidents", tech_center, len(tc_data))
+                else:
+                    logging.warning("No data found for tech center: %s", tech_center)
+        else:
+            # No tech_center column - treat all data as one group
+            logging.info("No tech_center column found, processing all data as 'All_Centers'")
+            tech_center_data['All_Centers'] = dataset.copy()
+            logging.info("All Centers: %d incidents", len(dataset))
         
         return tech_center_data
     
@@ -195,33 +202,55 @@ class PreprocessingPipeline:
             max_incidents = self.config.training.processing.get('max_incidents_per_training', 100000)
             if len(data) > max_incidents:
                 logging.info("Limiting %s incidents from %d to %d", tech_center, len(data), max_incidents)
-                data = data.sample(n=max_incidents, random_state=42).reset_index(drop=True)
-              # Run preprocessing pipeline
+                data = data.sample(n=max_incidents, random_state=42).reset_index(drop=True)            # Run preprocessing pipeline using the new incident processing method
             azure_config = self.config.azure.config
             batch_size_summarization = azure_config.get('summarization_batch_size', 10)
-            batch_size_embedding = azure_config.get('embedding_batch_size', 50)
-            use_batch_api = azure_config.get('use_batch_embedding_api', True)
             
-            summaries, embeddings, valid_indices, stats = self.orchestrator.run_complete_pipeline(
-                data,
-                summarization_batch_size=batch_size_summarization,
-                embedding_batch_size=batch_size_embedding,
-                use_batch_embedding_api=use_batch_api
+            # Use the new text processor method for incident dataframes
+            from preprocessing.text_processing import TextProcessor
+            text_processor = TextProcessor(self.config)
+            
+            # Process incidents to create combined summaries
+            summaries_series, text_stats = await text_processor.process_incident_for_embedding_batch(
+                data, batch_size=batch_size_summarization
             )
             
-            processing_duration = datetime.now() - processing_start
+            # Generate embeddings from summaries
+            from preprocessing.embedding_generation import EmbeddingGenerator
+            embedding_generator = EmbeddingGenerator(self.config)
             
-            if len(embeddings) > 0:
+            # Filter out failed summaries (NaN values)
+            valid_summaries = summaries_series.dropna()
+            valid_indices = valid_summaries.index
+            
+            if len(valid_summaries) == 0:
+                result = {
+                    "status": "failed",
+                    "reason": "no_valid_summaries",
+                    "incidents_processed": 0,
+                    "total_input_incidents": len(data),
+                    "text_processing_stats": text_stats
+                }
+                return result
+            
+            # Generate embeddings for valid summaries
+            embeddings_array, embedding_stats = await embedding_generator.generate_embeddings_batch(
+                valid_summaries.tolist(),
+                batch_size=azure_config.get('embedding_batch_size', 50)
+            )
+            
+            if len(embeddings_array) > 0:
                 result = {
                     "status": "success",
                     "tech_center": tech_center,
-                    "embeddings": embeddings,
+                    "embeddings": embeddings_array,
                     "incident_data": data.iloc[valid_indices],
-                    "summaries": summaries,
+                    "summaries": valid_summaries,
                     "incidents_processed": len(valid_indices),
                     "total_input_incidents": len(data),
                     "processing_duration_seconds": processing_duration.total_seconds(),
-                    "preprocessing_stats": stats
+                    "text_processing_stats": text_stats,
+                    "embedding_stats": embedding_stats
                 }
             else:
                 result = {
@@ -229,7 +258,8 @@ class PreprocessingPipeline:
                     "reason": "no_valid_embeddings",
                     "incidents_processed": 0,
                     "total_input_incidents": len(data),
-                    "preprocessing_stats": stats
+                    "text_processing_stats": text_stats,
+                    "embedding_stats": embedding_stats
                 }
             
             return result
@@ -354,3 +384,43 @@ class PreprocessingPipeline:
         # Clear any cached data or connections
         self.processing_stats = {}
         logging.info("Preprocessing pipeline resources cleaned up")
+    
+    async def llm_summarization(self, incidents: pd.DataFrame) -> pd.Series:
+        """
+        Perform LLM-based summarization on incident data.
+        
+        Args:
+            incidents: DataFrame containing incident data for summarization
+            
+        Returns:
+            Series with summarized text for each incident
+        """
+        from azure.ai.textanalytics import TextAnalyticsClient
+        from azure.core.credentials import AzureKeyCredential
+        
+        # Initialize Text Analytics client
+        ta_client = TextAnalyticsClient(
+            endpoint=self.config.azure.openai.endpoint,
+            credential=AzureKeyCredential(self.config.azure.openai.api_key)
+        )
+        
+        # Prepare documents for summarization
+        documents = incidents['incident_description'].tolist()
+        
+        try:
+            # Call the Text Analytics API for summarization
+            response = await ta_client.summarize(documents=documents)
+            
+            # Extract and return summaries
+            summaries = [doc.summary for doc in response if not doc.is_error]
+            
+            # Handle any errors in the response
+            for doc in response:
+                if doc.is_error:
+                    logging.error("Error summarizing document: %s", doc.error)
+            
+            return pd.Series(summaries)
+        
+        except Exception as e:
+            logging.error("LLM summarization failed: %s", str(e))
+            raise

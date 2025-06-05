@@ -323,25 +323,192 @@ class TextProcessor:
                     await asyncio.sleep(self.retry_delay)
                 else:
                     raise
-        
-        # If all retries failed, return original text
+          # If all retries failed, return original text
         logging.error("All summarization attempts failed, returning original text")
         return text
     
-    def _build_summarization_prompt(self, text: str) -> str:
-        """Build summarization prompt for Azure OpenAI"""
-        max_summary_length = self.text_config["max_summary_length"]
+    async def _generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for a batch of texts using Azure OpenAI"""
+        from .embedding_generation import EmbeddingGenerator
         
-        prompt = f"""
-        Please summarize the following incident report in {max_summary_length} characters or less. 
-        Focus on the key technical issues, symptoms, and resolution steps.
-        Keep the summary concise but informative for clustering purposes.
+        # Initialize embedding generator
+        embedding_generator = EmbeddingGenerator(self.config)
         
-        Incident Report:
-        {text}
+        # Generate embeddings using the specialized class
+        embeddings_array, valid_indices = await embedding_generator.generate_embeddings_batch(
+            texts, batch_size=50
+        )
         
-        Summary:
+        # Convert numpy array to list of lists for consistency
+        if len(embeddings_array) > 0:
+            embeddings_list = embeddings_array.tolist()
+            logging.info("Generated %d embeddings from %d texts", len(embeddings_list), len(texts))
+            return embeddings_list
+        else:
+            logging.warning("No embeddings generated, returning zero vectors")
+            # Return zero vectors as fallback
+            return [[0.0] * 1536] * len(texts)  # Default OpenAI embedding dimension
+    
+    def _create_output_dataframe(self, input_df: pd.DataFrame, summaries: pd.Series, 
+                                embeddings: List[List[float]], valid_indices: List[int]) -> pd.DataFrame:
+        """Create output DataFrame with only the required columns"""
+        
+        # Get processing version from config
+        processing_version = getattr(self.config.preprocessing, 'processing_version', 'v2.0.0')
+        current_timestamp = datetime.now()
+        
+        # Create output DataFrame with only valid rows
+        valid_rows = input_df.iloc[valid_indices].copy()
+        
+        output_data = {
+            'number': valid_rows['number'].values,
+            'sys_created_on': valid_rows['sys_created_on'].values,
+            'combined_incidents_summary': summaries.values,
+            'embedding': embeddings,
+            'created_timestamp': [current_timestamp] * len(valid_rows),
+            'processing_version': [processing_version] * len(valid_rows)
+        }
+        
+        output_df = pd.DataFrame(output_data)
+        
+        logging.info("Created output DataFrame with %d rows and columns: %s", 
+                    len(output_df), list(output_df.columns))
+        
+        return output_df
+    
+    async def process_incident_for_embedding_batch(self, df: pd.DataFrame, 
+                                           batch_size: int = 10) -> Tuple[pd.DataFrame, Dict]:
         """
+        Process incident DataFrame and return only the required output columns.
+        
+        Args:
+            df: DataFrame with incident columns (number, sys_created_on, description, short_description, business_service)
+            batch_size: Batch size for summarization
+            
+        Returns:
+            Tuple of (output_dataframe, processing_stats)
+        """
+        processing_start = datetime.now()
+        
+        logging.info("Processing %d incidents for embedding", len(df))
+        
+        try:
+            # Step 1: Validate required input columns
+            required_cols = ['number', 'sys_created_on', 'description', 'short_description', 'business_service']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                raise ValueError(f"Missing required columns: {missing_cols}")
+            
+            # Step 2: Combine and clean text columns
+            combined_texts = self._combine_incident_columns(df)
+            
+            # Step 3: Process combined texts for summarization
+            processed_texts, valid_indices, processing_stats = await self.process_texts_for_training(
+                combined_texts, batch_size=batch_size
+            )
+            
+            # Step 4: Generate embeddings from summaries
+            embeddings_data = await self._generate_embeddings_batch(processed_texts.tolist())
+            
+            # Step 5: Create output DataFrame with only required columns
+            output_df = self._create_output_dataframe(df, processed_texts, embeddings_data, valid_indices)
+            
+            processing_duration = datetime.now() - processing_start
+            
+            stats = {
+                "status": "success",
+                "total_incidents": len(df),
+                "processed_incidents": len(output_df),
+                "success_rate": (len(output_df) / len(df)) * 100 if len(df) > 0 else 0,
+                "processing_duration_seconds": processing_duration.total_seconds(),
+                "failed_incidents": len(df) - len(output_df),
+                "text_processing_stats": processing_stats
+            }
+            
+            logging.info("Incident processing completed: %.1f%% success rate (%d/%d)",
+                        stats['success_rate'], stats['processed_incidents'], stats['total_incidents'])
+            
+            return output_df, stats
+            
+        except Exception as e:
+            processing_duration = datetime.now() - processing_start
+            logging.error("Incident processing failed: %s", str(e))
+            
+            # Return empty DataFrame with correct structure
+            empty_df = pd.DataFrame(columns=[
+                'number', 'sys_created_on', 'combined_incidents_summary', 
+                'embedding', 'created_timestamp', 'processing_version'
+            ])
+            
+            stats = {
+                "status": "failed",
+                "error": str(e),
+                "total_incidents": len(df),
+                "processed_incidents": 0,
+                "success_rate": 0,
+                "processing_duration_seconds": processing_duration.total_seconds()
+            }
+            
+            return empty_df, stats
+    
+    def _combine_incident_columns(self, df: pd.DataFrame) -> List[str]:
+        """
+        Combine and clean the configured text columns from incident DataFrame.
+        
+        Args:
+            df: DataFrame with incident data
+            
+        Returns:
+            List of combined and cleaned text strings
+        """
+        text_columns = self.config.preprocessing.text_columns_to_process
+        combined_texts = []
+        
+        for _, row in df.iterrows():
+            text_parts = []
+            
+            # Extract and clean each configured column
+            for column in text_columns:
+                if column in df.columns and pd.notna(row[column]):
+                    # Clean the individual column
+                    cleaned_text = self._deep_clean_text(str(row[column]))
+                    
+                    if len(cleaned_text.strip()) > 0:
+                        text_parts.append(cleaned_text)
+            
+            # Combine all parts with separator
+            if text_parts:
+                combined_text = " | ".join(text_parts)
+                combined_texts.append(combined_text)
+            else:
+                # Handle case where no valid text found
+                combined_texts.append("No description available")
+        
+        logging.debug("Combined %d incident texts from columns: %s", 
+                     len(combined_texts), text_columns)
+          return combined_texts
+    
+    def _build_summarization_prompt(self, text: str) -> str:
+        """Build summarization prompt for Azure OpenAI with specific format"""
+        # Use configured prompt template or default
+        prompt_template = getattr(self.config.preprocessing.summarization, 'summary_prompt_template', None)
+        max_words = getattr(self.config.preprocessing.summarization, 'max_summary_length', 30)
+        
+        if prompt_template:
+            # Use configured template
+            prompt = prompt_template.format(combined_text=text, max_words=max_words)
+        else:
+            # Default prompt for your requirements
+            prompt = f"""
+            Summarize the following incident information in exactly {max_words} words or less.
+            Focus on: what issues occurred and which application/system was affected.
+            Format: [Issue description] affecting [Application/System name].
+            
+            Incident Details:
+            {text}
+            
+            {max_words}-word Summary:
+            """
         
         return prompt.strip()
     

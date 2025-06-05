@@ -1,10 +1,14 @@
 # filepath: c:\Users\Bachn\OneDrive\Desktop\my_projects\hdbscan\preprocessing\embedding_processor.py
-import logging
-import time
-import numpy as np
-import pandas as pd
-from typing import Tuple, List, Dict, Set, Optional
-from tqdm.auto import tqdm
+# DEPRECATED FILE - CAN BE SAFELY DELETED
+# 
+# This file contains duplicate EmbeddingProcessor functionality
+# that is not used in the current pipeline architecture.
+# 
+# The embedding generation is now handled by:
+# - embedding_generation.py (EmbeddingGenerator class)
+# - text_processing.py (_generate_embeddings_batch method)
+#
+# This file can be removed to simplify the codebase.
 
 class EmbeddingProcessor:
     """Enhanced embedding processing with comprehensive error handling and no fallbacks"""

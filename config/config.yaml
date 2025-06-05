@@ -42,15 +42,15 @@ azure:
 bigquery:
   project_id: "enterprise-dashboardnp-cd35"
   service_account_key_path: ${SERVICE_ACCOUNT_KEY_PATH}
-  
-  # Source tables
+    # Source tables
   tables:
     # Raw data sources
     incidents: ${INCIDENT_TABLE}
     team_services: ${TEAM_SERVICES_TABLE}
     problems: ${PROBLEM_TABLE}
-      # Source table for training data (was hardcoded in bigquery_client.py)
-    incident_source: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.your_incident_table"
+      # Source table for training data (updated for your specific table)
+    incident_source: "enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.oa_snow_incident_mgmt_srv_dev"
+    raw_incidents: "enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.oa_snow_incident_mgmt_srv_dev"
     
     # Pipeline tables - HYBRID STORAGE ARCHITECTURE
     preprocessed_incidents: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.preprocessed_incidents"
@@ -70,9 +70,21 @@ bigquery:
     # Operational tables (BigQuery)
     training_logs: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.training_logs"
     watermarks: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.preprocessing_watermarks"
-
   # SQL Query templates to eliminate hardcoded queries
   queries:
+    # New query for preprocessing pipeline input
+    incident_data_for_preprocessing: |
+      SELECT 
+        number,
+        sys_created_on,
+        description,
+        short_description,
+        business_service
+      FROM `{source_table}`
+      WHERE sys_created_on >= '{start_date}' 
+      AND sys_created_on <= '{end_date}'
+      ORDER BY sys_created_on DESC
+    
     training_data_window: |
       SELECT incident_number, description, created_date, tech_center
       FROM `{source_table}`
@@ -105,6 +117,14 @@ bigquery:
       - {name: "model_params", type: "JSON", mode: "NULLABLE"}
       - {name: "cluster_count", type: "INTEGER", mode: "NULLABLE"}
       - {name: "silhouette_score", type: "FLOAT", mode: "NULLABLE"}
+      # Schema for preprocessed_incidents table (simplified output)
+    preprocessed_incidents:
+      - {name: "number", type: "STRING", mode: "REQUIRED"}
+      - {name: "sys_created_on", type: "TIMESTAMP", mode: "REQUIRED"}
+      - {name: "combined_incidents_summary", type: "STRING", mode: "NULLABLE"}
+      - {name: "embedding", type: "REPEATED", mode: "NULLABLE", fields: [{name: "value", type: "FLOAT"}]}
+      - {name: "created_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
+      - {name: "processing_version", type: "STRING", mode: "REQUIRED"}
     
     training_data:
       - {name: "incident_number", type: "STRING", mode: "REQUIRED"}
@@ -167,6 +187,55 @@ bigquery:
       - {name: "prediction_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
       - {name: "model_table_used", type: "STRING", mode: "NULLABLE"}
       - {name: "blob_model_path", type: "STRING", mode: "NULLABLE"}
+
+# ===================================================================
+# PREPROCESSING CONFIGURATION
+# ===================================================================
+preprocessing:
+  # Text processing configuration
+  text_columns_to_process: ["description", "short_description", "business_service"]
+  text_column_for_summary_input: "combined_text_for_summary"
+  summary_column_name: "combined_incidents_summary"
+  
+  # Processing version for tracking
+  processing_version: "v2.0.0"
+  
+  # Tech center mapping (business_service -> tech_center)
+  tech_center_mapping:
+    "Data Analytics": "BT-TC-Data Analytics"
+    "Network Operations": "BT-TC-Network Operations"
+    "Security Operations": "BT-TC-Security Operations"
+    "Infrastructure Services": "BT-TC-Infrastructure Services"
+    "Product Development": "BT-TC-Product Development Engineering"
+    "Cloud Services": "BT-TC-Cloud Services"
+    "Enterprise Applications": "BT-TC-Enterprise Applications"
+    # Add more mappings as needed
+  default_tech_center: "BT-TC-General"
+  
+  # Text cleaning settings
+  clean_text:
+    remove_special_characters: true
+    remove_emails: true
+    remove_urls: true
+    normalize_whitespace: true
+    min_text_length: 10
+  
+  # Summarization settings
+  summarization:
+    enabled: true
+    max_summary_length: 30  # Maximum words in summary
+    summary_prompt_template: |
+      Summarize the following incident information in exactly 30 words or less.
+      Focus on: what issues occurred and which application/system was affected.
+      Format: [Issue description] affecting [Application/System name].
+      
+      Incident Details:
+      {combined_text}
+      
+      30-word Summary:
+    model_name: "gpt-35-turbo"
+    max_retries: 3
+    batch_size: 5
 
 # ===================================================================
 # TRAINING CONFIGURATION - CUMULATIVE APPROACH

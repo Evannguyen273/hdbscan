@@ -72,12 +72,14 @@ class PipelineOrchestrator:
             if len(dataset) == 0:
                 logging.error("No data available for training")
                 return {"status": "failed", "version": version, "reason": "no_data"}
-            
-            # Stage 2: Run preprocessing pipeline
+              # Stage 2: Run preprocessing pipeline
             logging.info("Stage 2: Running preprocessing pipeline...")
-            preprocessing_results = await self.preprocessing_pipeline.process_for_training(dataset)
+            preprocessing_results = await self._run_preprocessing_pipeline(dataset, version)
             
-            # Stage 3: Run training for all tech centers
+            if preprocessing_results['status'] != 'success':
+                raise Exception(f"Preprocessing failed: {preprocessing_results.get('error', 'Unknown error')}")
+            
+            # Stage 3: Run training for all tech centers (using preprocessed data)
             logging.info("Stage 3: Running training for all tech centers...")
             training_results = await self._run_parallel_training(
                 preprocessing_results, version, year, quarter
@@ -196,8 +198,7 @@ class PipelineOrchestrator:
         else:
             next_training_month = min([m for m in training_months if m > current_month] + 
                                      [m + 12 for m in training_months])
-            logging.info("Training not due. Next training in month %d", next_training_month % 12)
-            return {
+            logging.info("Training not due. Next training in month %d", next_training_month % 12)            return {
                 "status": "skipped", 
                 "reason": "not_scheduled",
                 "next_training_month": next_training_month % 12
@@ -214,15 +215,32 @@ class PipelineOrchestrator:
         logging.info("Fetching cumulative data from %s to %s (%d months)", 
                     start_date.date(), end_date.date(), window_months)
         
-        # Fetch data from BigQuery
-        query = f"""
-        SELECT *
-        FROM `{self.config.bigquery.tables['raw_incidents']}`
-        WHERE created_date >= '{start_date.date()}'
-        AND created_date <= '{end_date.date()}'
-        AND tech_center IN ({','.join([f"'{tc}'" for tc in self.config.tech_centers])})
-        ORDER BY created_date
-        """
+        # Use the new query template for preprocessing data
+        source_table = self.config.bigquery.tables['raw_incidents']
+        query_template = self.config.bigquery.queries.get('incident_data_for_preprocessing')
+        
+        if query_template:
+            query = query_template.format(
+                source_table=source_table,
+                start_date=start_date.date(),
+                end_date=end_date.date()
+            )
+        else:
+            # Fallback query if template not available
+            query = f"""
+            SELECT 
+                number,
+                sys_created_on,
+                description,
+                short_description,
+                business_service
+            FROM `{source_table}`
+            WHERE sys_created_on >= '{start_date.date()}'
+            AND sys_created_on <= '{end_date.date()}'
+            ORDER BY sys_created_on DESC
+            """
+        
+        logging.info("Executing query: %s", query[:200] + "..." if len(query) > 200 else query)
         
         return await self.bigquery_client.query_to_dataframe(query)
     
@@ -396,3 +414,76 @@ class PipelineOrchestrator:
             "pipeline_stats": self.pipeline_stats,
             "last_updated": datetime.now().isoformat()
         }
+    
+    async def _run_preprocessing_pipeline(self, raw_data: pd.DataFrame, version: str) -> Dict:
+        """Run preprocessing pipeline to create summaries and embeddings"""
+        from preprocessing.text_processing import TextProcessor
+        
+        preprocessing_results = {}
+        
+        try:
+            # Initialize text processor
+            text_processor = TextProcessor(self.config)
+            
+            # Process all incidents at once (no tech center separation at this stage)
+            logging.info("Starting preprocessing for %d incidents", len(raw_data))
+            
+            # Process incidents and get output DataFrame with only required columns
+            processed_df, processing_stats = await text_processor.process_incident_for_embedding_batch(
+                raw_data, batch_size=self.config.preprocessing.summarization['batch_size']
+            )
+            
+            if processing_stats['status'] == 'success':
+                # Store processed data to BigQuery
+                table_name = self.config.bigquery.tables.preprocessed_incidents
+                await self.bigquery_client.insert_dataframe(processed_df, table_name)
+                
+                # Log successful preprocessing
+                await self._log_training_event(
+                    run_id=f"preprocess_{version}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                    tech_center="ALL",
+                    model_version=version,
+                    stage="preprocessing",
+                    level="INFO",
+                    message=f"Preprocessing completed successfully",
+                    details={
+                        "total_incidents": processing_stats['total_incidents'],
+                        "processed_incidents": processing_stats['processed_incidents'],
+                        "success_rate": processing_stats['success_rate']
+                    }
+                )
+                
+                preprocessing_results = {
+                    "status": "success",
+                    "processed_incidents": len(processed_df),
+                    "processing_stats": processing_stats,
+                    "output_table": table_name
+                }
+                
+                logging.info("Preprocessing completed successfully: %d incidents processed", 
+                           len(processed_df))
+                
+            else:
+                raise Exception(f"Preprocessing failed: {processing_stats.get('error', 'Unknown error')}")
+            
+        except Exception as e:
+            logging.error("Preprocessing pipeline failed: %s", str(e))
+            
+            # Log failed preprocessing
+            await self._log_training_event(
+                run_id=f"preprocess_{version}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                tech_center="ALL",
+                model_version=version,
+                stage="preprocessing",
+                level="ERROR",
+                message=f"Preprocessing failed: {str(e)}",
+                details={"error": str(e)}
+            )
+            
+            preprocessing_results = {
+                "status": "failed",
+                "error": str(e),
+                "processed_incidents": 0
+            }
+        
+        return preprocessing_results

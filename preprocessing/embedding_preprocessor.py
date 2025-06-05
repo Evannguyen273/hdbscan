@@ -1,16 +1,8 @@
-# preprocessing/embedding_preprocessor.py
-# Updated for new config structure and cumulative training approach
-import logging
-import numpy as np
-import pandas as pd
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-import umap
-
-from config.config import get_config
-from .embedding_generation import EmbeddingGenerator
+# This file has been deprecated and is no longer needed.
+# The functionality has been integrated into text_processing.py
+# and embedding_generation.py for a cleaner architecture.
+# 
+# File can be safely deleted.
 
 class EmbeddingProcessor:
     """
