@@ -79,17 +79,36 @@ async def run_preprocessing_direct(tech_center: str, start_date: str, end_date: 
     # Create result dataframe
     result_df = incidents_df.iloc[valid_indices].copy()
     result_df['processed_text'] = list(processed_texts.values())
-    result_df['processing_timestamp'] = datetime.now()
+    result_df['processing_timestamp'] = datetime.now()    # 3. Store results in preprocessed_incidents table
+    print("💾 Storing results in preprocessed_incidents table...")
     
-    # Store using your existing method
-    version = f"{tech_center}_{start_date}_{end_date}".replace('-', '_')
-    success = bq_client.store_training_data(version, result_df)
+    # Create result dataframe matching preprocessed_incidents schema
+    result_df = incidents_df.iloc[valid_indices].copy()
+    
+    # Map columns to match schema
+    result_df = result_df.rename(columns={
+        'incident_number': 'number',
+        'created_date': 'sys_created_on'
+    })
+    
+    # Add required fields for preprocessed_incidents schema
+    result_df['combined_incidents_summary'] = list(processed_texts.values())
+    result_df['created_timestamp'] = datetime.now()
+    result_df['processing_version'] = f"v2.0.0_{tech_center}_{start_date}_{end_date}"
+    
+    # Select only the columns that match preprocessed_incidents schema
+    final_columns = ['number', 'sys_created_on', 'combined_incidents_summary', 
+                    'created_timestamp', 'processing_version']
+    result_df = result_df[final_columns]
+      # Store using the new method
+    success = bq_client.store_preprocessed_incidents(result_df)
     
     if success:
         print(f"✅ SUCCESS! Stored {len(result_df)} preprocessed incidents")
-        print(f"📋 Version: {version}")
+        print(f"📋 Table: preprocessed_incidents")
+        print(f"📋 Processing Version: v2.0.0_{tech_center}_{start_date}_{end_date}")
     else:
-        print("❌ Failed to store results")
+        print("❌ Failed to store preprocessed results")
     
     return success
 

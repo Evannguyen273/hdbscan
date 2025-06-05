@@ -392,9 +392,94 @@ class BigQueryClient:
             self.operation_stats["records_inserted"] += len(cluster_results)
             logging.info("Stored %d cluster results for version %s", len(cluster_results), version)
             return True
+              except Exception as e:
+            logging.error("Failed to store cluster results: %s", str(e))
+            return False
+    
+    def store_preprocessed_incidents(self, preprocessed_data: pd.DataFrame) -> bool:
+        """
+        Store preprocessed incidents to the preprocessed_incidents table
+        
+        Args:
+            preprocessed_data: DataFrame with columns matching preprocessed_incidents schema
+            
+        Returns:
+            bool: Success status
+        """
+        try:
+            table_id = self.config.bigquery.tables.preprocessed_incidents
+            
+            # Validate required columns
+            required_columns = ['number', 'sys_created_on', 'combined_incidents_summary', 
+                              'created_timestamp', 'processing_version']
+            
+            missing_columns = set(required_columns) - set(preprocessed_data.columns)
+            if missing_columns:
+                logging.error(f"Missing required columns: {missing_columns}")
+                return False
+            
+            # Convert DataFrame to records for BigQuery
+            records = preprocessed_data.to_dict('records')
+            
+            # Insert data
+            errors = self.client.insert_rows_json(
+                self.client.get_table(table_id), 
+                records
+            )
+            
+            if errors:
+                logging.error(f"Failed to insert preprocessed incidents: {errors}")
+                return False
+            
+            self.operation_stats["records_inserted"] += len(preprocessed_data)
+            logging.info(f"Successfully stored {len(preprocessed_data)} preprocessed incidents")
+            return True
             
         except Exception as e:
-            logging.error("Failed to store cluster results: %s", str(e))
+            logging.error(f"Failed to store preprocessed incidents: {str(e)}")
+            return False
+    
+    def store_preprocessed_incidents(self, preprocessed_data: pd.DataFrame) -> bool:
+        """
+        Store preprocessed incidents to the preprocessed_incidents table
+        
+        Args:
+            preprocessed_data: DataFrame with columns matching preprocessed_incidents schema
+            
+        Returns:
+            bool: Success status
+        """
+        try:
+            table_id = self.config.bigquery.tables.preprocessed_incidents
+            
+            # Validate required columns
+            required_columns = ['number', 'sys_created_on', 'combined_incidents_summary', 
+                              'created_timestamp', 'processing_version']
+            
+            missing_columns = set(required_columns) - set(preprocessed_data.columns)
+            if missing_columns:
+                logging.error(f"Missing required columns: {missing_columns}")
+                return False
+            
+            # Convert DataFrame to records for BigQuery
+            records = preprocessed_data.to_dict('records')
+            
+            # Insert data
+            errors = self.client.insert_rows_json(
+                self.client.get_table(table_id), 
+                records
+            )
+            
+            if errors:
+                logging.error(f"Failed to insert preprocessed incidents: {errors}")
+                return False
+            
+            self.operation_stats["records_inserted"] += len(preprocessed_data)
+            logging.info(f"Successfully stored {len(preprocessed_data)} preprocessed incidents")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to store preprocessed incidents: {str(e)}")
             return False
     
     def cleanup_old_versions(self, retention_days: int = None) -> bool:
