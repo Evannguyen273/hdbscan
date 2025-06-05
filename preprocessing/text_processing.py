@@ -483,34 +483,97 @@ class TextProcessor:
             else:
                 # Handle case where no valid text found
                 combined_texts.append("No description available")
-        
-        logging.debug("Combined %d incident texts from columns: %s", 
+          logging.debug("Combined %d incident texts from columns: %s", 
                      len(combined_texts), text_columns)
-          return combined_texts
+        return combined_texts
     
     def _build_summarization_prompt(self, text: str) -> str:
-        """Build summarization prompt for Azure OpenAI with specific format"""
-        # Use configured prompt template or default
-        prompt_template = getattr(self.config.preprocessing.summarization, 'summary_prompt_template', None)
+        """Build summarization prompt for Azure OpenAI with input length safeguards"""
         max_words = getattr(self.config.preprocessing.summarization, 'max_summary_length', 30)
         
-        if prompt_template:
-            # Use configured template
-            prompt = prompt_template.format(combined_text=text, max_words=max_words)
-        else:
-            # Default prompt for your requirements
-            prompt = f"""
-            Summarize the following incident information in exactly {max_words} words or less.
-            Focus on: what issues occurred and which application/system was affected.
-            Format: [Issue description] affecting [Application/System name].
-            
-            Incident Details:
-            {text}
-            
-            {max_words}-word Summary:
-            """
+        # Generous limit: 100K tokens ≈ 400K characters  
+        # This handles even the largest possible incident descriptions
+        MAX_INPUT_CHARS = 400000
         
-        return prompt.strip()
+        if len(text) > MAX_INPUT_CHARS:
+            logging.warning(f"Very large input detected ({len(text)} chars). Using chunking strategy.")
+            # For extremely large texts, use chunking
+            summary = self._chunk_and_summarize(text, max_words)
+            return summary
+        elif len(text) > 50000:  # Still large but manageable
+            # Smart truncation for moderately large texts
+            first_part_end = int(50000 * 0.7)  # 35K chars
+            last_part_start = len(text) - int(50000 * 0.3)  # Last 15K chars
+            
+            truncated_text = text[:first_part_end] + "\n[...content truncated...]\n" + text[last_part_start:]
+            logging.info(f"Large input truncated from {len(text)} to {len(truncated_text)} characters")
+        else:
+            truncated_text = text
+        
+        # Build prompt with processed text
+        prompt = f"""Summarize the following incident in exactly {max_words} words.
+Focus on: what issue occurred and which system/application was affected.
+
+Incident Details:
+{truncated_text}
+
+{max_words}-word summary:"""
+        
+        return prompt
+    
+    def _chunk_and_summarize(self, text: str, max_words: int) -> str:
+        """Handle extremely large texts using chunking strategy"""
+        
+        # Split into manageable chunks (50K chars each ≈ 12.5K tokens)
+        chunk_size = 50000
+        chunks = []
+        
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i:i + chunk_size]
+            chunks.append(chunk)
+        
+        logging.info(f"Split large text into {len(chunks)} chunks for processing")
+          if len(chunks) == 1:
+            # Single chunk, process directly without recursion
+            chunk_text = chunks[0]
+            prompt = f"""Summarize the following incident in exactly {max_words} words.
+Focus on: what issue occurred and which system/application was affected.
+
+Incident Details:
+{chunk_text}
+
+{max_words}-word summary:"""
+            return prompt
+        
+        # Multi-chunk strategy: Prioritize key sections
+        # Take first chunk (likely has main issue description)
+        # Take last chunk (likely has resolution/system info)  
+        # Take middle chunk if there are many chunks
+        
+        key_chunks = []
+        key_chunks.append(chunks[0])  # First chunk
+        
+        if len(chunks) > 2:
+            key_chunks.append(chunks[-1])  # Last chunk
+            
+        if len(chunks) > 4:
+            middle_idx = len(chunks) // 2
+            key_chunks.append(chunks[middle_idx])  # Middle chunk
+        
+        # Combine key chunks
+        combined_key_text = "\n\n--- SECTION BREAK ---\n\n".join(key_chunks)
+        
+        # Now summarize the combined key sections
+        prompt = f"""Summarize the following incident sections in exactly {max_words} words.
+Focus on: what issue occurred and which system/application was affected.
+Note: This text contains multiple sections from a large incident description.
+
+Incident Details:
+{combined_key_text}
+
+{max_words}-word summary:"""
+        
+        return prompt
     
     def get_processing_statistics(self) -> Dict[str, Any]:
         """Get text processing statistics"""

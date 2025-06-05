@@ -260,6 +260,95 @@ def test_new_configuration_sections():
         print(f"❌ New configuration sections test failed: {e}")
         return False
 
+def test_text_processing_large_input_handling():
+    """Test that text processing can handle very large inputs"""
+    try:
+        from config.config import Config
+        from preprocessing.text_processing import TextProcessor
+        import pandas as pd
+        
+        config = Config()
+        processor = TextProcessor(config)
+        
+        # Create a very large text (simulate 500K characters)
+        large_text = "This is a test incident description. " * 15000  # ~500K chars
+        
+        # Test chunking logic
+        prompt = processor._build_summarization_prompt(large_text)
+        
+        # Should trigger chunking since 500K > 400K limit
+        if "SECTION BREAK" in prompt:
+            print("✅ Large input chunking works correctly")
+            return True
+        else:
+            print("❌ Large input chunking failed")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Large input handling test failed: {e}")
+        return False
+
+def test_text_processing_medium_input_truncation():
+    """Test that medium-sized inputs are truncated correctly"""
+    try:
+        from config.config import Config  
+        from preprocessing.text_processing import TextProcessor
+        
+        config = Config()
+        processor = TextProcessor(config)
+        
+        # Create medium text (60K characters)
+        medium_text = "This is a medium incident description. " * 1500  # ~60K chars
+        
+        # Test truncation logic
+        prompt = processor._build_summarization_prompt(medium_text)
+        
+        # Should trigger truncation since 60K > 50K but < 400K
+        if "content truncated" in prompt:
+            print("✅ Medium input truncation works correctly")
+            return True
+        else:
+            print("❌ Medium input truncation failed")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Medium input handling test failed: {e}")
+        return False
+
+def test_text_processing_token_limits_config():
+    """Test that token limit configurations are properly loaded"""
+    try:
+        from config.config import Config
+        
+        config = Config()
+        
+        # Check new summarization config
+        summarization = config.preprocessing.summarization
+        
+        if not hasattr(summarization, 'max_input_chars'):
+            print("❌ max_input_chars not configured")
+            return False
+            
+        if not hasattr(summarization, 'chunk_size_chars'):
+            print("❌ chunk_size_chars not configured")
+            return False
+            
+        # Validate values
+        if summarization.max_input_chars != 400000:
+            print(f"❌ max_input_chars should be 400000, got {summarization.max_input_chars}")
+            return False
+            
+        if summarization.chunk_size_chars != 50000:
+            print(f"❌ chunk_size_chars should be 50000, got {summarization.chunk_size_chars}")
+            return False
+            
+        print("✅ Token limit configurations loaded correctly")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Token limits config test failed: {e}")
+        return False
+
 def run_all_tests():
     """Run all tests and return summary"""
     tests = [
@@ -271,7 +360,10 @@ def run_all_tests():
         test_schema_definitions_exist,
         test_incident_schema_validation,
         test_operational_tables_configured,
-        test_new_configuration_sections
+        test_new_configuration_sections,
+        test_text_processing_large_input_handling,
+        test_text_processing_medium_input_truncation,
+        test_text_processing_token_limits_config
     ]
     
     print("Running configuration and schema validation tests...\n")
