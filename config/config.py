@@ -12,26 +12,26 @@ from pydantic import BaseModel, validator
 
 class Config:
     """Configuration manager for consolidated config.yaml"""
-    
+
     def __init__(self, config_path: Optional[str] = None):
         # Load environment variables
         self._load_environment()
           # Determine config file
         if config_path is None:
             config_path = self._get_default_config_path()
-        
+
         # Load configuration
         self.config = self._load_config(config_path)
         self.config_path = config_path
-        
+
         # Apply environment variable substitution
         self.config = self._substitute_env_vars(self.config)
-        
+
         # Validate configuration
         self._validate_config()
-        
+
         logging.info("Configuration loaded from: %s", config_path)
-    
+
     def _load_environment(self):
         """Load environment variables from .env file"""
         env_file = Path(__file__).parent.parent / '.env'
@@ -40,29 +40,31 @@ class Config:
             logging.info("Loaded environment variables from %s", env_file)
         else:
             logging.warning("No .env file found, using system environment variables")
-    
+
     def _get_default_config_path(self) -> str:
         """Get default config path using config.yaml"""
         config_dir = Path(__file__).parent
         main_config = config_dir / 'config.yaml'
         if main_config.exists():
             return str(main_config)
-        raise FileNotFoundError("Configuration file not found: config.yaml")    def _load_config(self, config_path: str) -> Dict[str, Any]:
+        raise FileNotFoundError("Configuration file not found: config.yaml")
+
+    def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load YAML configuration file"""
         try:
             with open(config_path, 'r') as file:
                 config_data = yaml.safe_load(file)
-            
+
             # Apply environment-specific overrides FIRST
             config_data = self._apply_environment_overrides(config_data)
-            
+
             # Then apply environment variable substitution
             config_data = self._substitute_env_vars(config_data)
-            
+
             return config_data
         except Exception as e:
             raise ValueError(f"Failed to load configuration from {config_path}: {e}")
-    
+
     def _substitute_env_vars(self, obj: Any) -> Any:
         """Recursively substitute environment variables in configuration"""
         if isinstance(obj, dict):
@@ -81,15 +83,15 @@ class Config:
                     return json.loads(env_value)
                 except json.JSONDecodeError:
                     return env_value
-            
+
             return env_value
         else:
             return obj
-    
+
     def _validate_config(self):
         """Validate that required configuration sections exist"""
         required_sections = ['bigquery', 'azure', 'clustering', 'training', 'prediction']
-        
+
         for section in required_sections:
             if section not in self.config:
                 logging.warning("Configuration section '%s' not found, using defaults", section)
@@ -99,50 +101,52 @@ class Config:
             'OPENAI_API_KEY',
             'BLOB_CONNECTION_STRING'
         ]
-        
+
         missing_vars = [var for var in required_env_vars if not os.getenv(var)]
         if missing_vars:
             logging.error("Missing required environment variables: %s", missing_vars)
             raise ValueError("Missing required environment variables: %s" % missing_vars)
-    
+
     def get(self, key_path: str, default=None):
         """Get configuration value using dot notation"""
         keys = key_path.split('.')
         value = self.config
-        
+
         for key in keys:
             if isinstance(value, dict) and key in value:
                 value = value[key]
             else:
                 return default
-        
+
         return value
-    
+
     @property
     def bigquery(self):
         """Get BigQuery configuration"""
-        return BigQueryConfig(self.config.get('bigquery', {}))
-    
+        # Fix: Unpack the dictionary when creating the Pydantic model
+        return BigQueryConfig(**self.config.get('bigquery', {}))
+
     @property
     def azure(self):
         """Get Azure configuration"""
-        return AzureConfig(self.config.get('azure', {}))
-    
+        # Fix: Unpack the dictionary when creating the Pydantic model
+        return AzureConfig(**self.config.get('azure', {}))
+
     @property
     def clustering(self):
         """Get clustering configuration"""
         return ClusteringConfig(self.config.get('clustering', {}))
-    
+
     @property
     def training(self):
         """Get training configuration"""
         return TrainingConfig(self.config.get('training', {}))
-    
+
     @property
     def prediction(self):
         """Get prediction configuration"""
         return PredictionConfig(self.config.get('prediction', {}))
-    
+
     @property
     def tech_centers(self):
         """Get tech centers configuration"""
@@ -152,7 +156,7 @@ class Config:
                 # New format with primary/additional
                 primary = tech_centers_config.get('primary', [])
                 additional = tech_centers_config.get('additional', [])
-                
+
                 # Convert primary list to names
                 primary_names = []
                 for tc in primary:
@@ -160,60 +164,67 @@ class Config:
                         primary_names.append(tc['name'])
                     else:
                         primary_names.append(str(tc))
-                
+
                 return primary_names + additional
             else:
                 # Old format - simple list
                 return tech_centers_config
         return []
-    
+
     @property
     def monitoring(self):
         """Get monitoring configuration"""
         return MonitoringConfig(**self.config.get('monitoring', {}))
-    
+
     @property
     def cost_optimization(self):
         """Get cost optimization configuration"""
         return CostOptimizationConfig(**self.config.get('cost_optimization', {}))
-    
+
     @property
     def performance(self):
         """Get performance configuration"""
         return PerformanceConfig(**self.config.get('performance', {}))
-    
+
     @property
     def security(self):
-        """Get security configuration"""  
+        """Get security configuration"""
         return SecurityConfig(**self.config.get('security', {}))
-    
+
     @property
     def tech_centers_config(self):
         """Get tech centers configuration with validation"""
         return TechCentersConfig(**self.config.get('tech_centers', {}))
-    
+
     @property
     def logging_config(self):
         """Get logging configuration"""
         return LoggingConfig(**self.config.get('logging', {}))
 
+    @property
+    def preprocessing(self):
+        """Get preprocessing configuration"""
+        # Create a PreprocessingConfig from the 'preprocessing' section in config
+        preprocessing_data = self.config.get('preprocessing', {})
+        return PreprocessingConfig(**preprocessing_data)
+
     def _apply_environment_overrides(self, config_data: Dict[str, Any]) -> Dict[str, Any]:
         """Apply environment-specific overrides from the 'environments' section"""
         # Get current environment from config or environment variable
         current_env = (
-            config_data.get('global', {}).get('environment') or 
+            config_data.get('global', {}).get('environment') or
             os.environ.get('APP_ENV', 'development')
         )
-        
+
         environments_config = config_data.get('environments', {})
-        
+
         if current_env not in environments_config:
             logging.info("No environment overrides found for '%s'. Using base config.", current_env)
             return config_data
-        
+
         env_overrides = environments_config[current_env]
         logging.info("Applying environment overrides for: '%s'", current_env)
-        
+
         # Deep merge overrides
         def deep_merge(base: Dict, override: Dict) -> Dict:
             result = base.copy()
@@ -223,12 +234,12 @@ class Config:
                 else:
                     result[key] = value
             return result
-        
+
         merged_config = deep_merge(config_data, env_overrides)
-        
+
         # Remove environments section from final config
         merged_config.pop('environments', None)
-        
+
         return merged_config
 
 class BigQueryTableConfig(BaseModel):
@@ -244,11 +255,13 @@ class BigQueryTableConfig(BaseModel):
     model_registry: str
     training_logs: str  # Added for operational logging
     watermarks: str     # Added for processing checkpoints
-    
+    cluster_results: Optional[str] = None  # Make this optional with None default
+    raw_incidents: str = ""  # Optional with default empty string
+
     @validator('*')
     def validate_table_names(cls, v):
         if not v or not v.strip():
-            raise ValueError("Table name cannot be empty")
+            return v  # Allow empty strings for optional fields
         return v
 
 class BigQueryQueriesConfig(BaseModel):
@@ -256,7 +269,9 @@ class BigQueryQueriesConfig(BaseModel):
     training_data_window: str
     model_registry_insert: str
     cluster_results_insert: str
-    
+    incident_data_for_preprocessing: str  # Add this field for the new query template
+    get_watermark_for_preprocessing: Optional[str] = None  # Make this optional with None default
+
     @validator('*')
     def validate_queries(cls, v):
         if not v or not v.strip():
@@ -266,16 +281,32 @@ class BigQueryQueriesConfig(BaseModel):
 class BigQueryConfig(BaseModel):
     """BigQuery configuration with validation"""
     project_id: str
-    service_account_key_path: str
+    service_account_key_path: Any  # Change from str to Any to accept both string paths and dictionaries
     tables: BigQueryTableConfig
     queries: BigQueryQueriesConfig
     schemas: Dict[str, List[Dict]]
-    
+
     @validator('project_id')
     def validate_project_id(cls, v):
         if not v or not v.strip():
             raise ValueError("BigQuery project_id cannot be empty")
         return v
+
+    # Add validator to handle service account key
+    @validator('service_account_key_path')
+    def validate_service_account(cls, v):
+        # Allow both string paths and dictionaries (parsed JSON)
+        if isinstance(v, dict):
+            # Ensure basic structure for service account
+            required_keys = ['type', 'project_id', 'private_key_id', 'private_key']
+            for key in required_keys:
+                if key not in v and key != 'private_key':
+                    logging.warning(f"Service account JSON may be incomplete: missing {key}")
+            return v
+        elif isinstance(v, str) and v.strip():
+            return v
+        else:
+            raise ValueError("Service account must be either a valid path or JSON data")
 
 class AzureOpenAIConfig(BaseModel):
     """Azure OpenAI configuration with validation"""
@@ -287,7 +318,7 @@ class AzureOpenAIConfig(BaseModel):
     embedding_api_version: str
     embedding_key: str
     embedding_model: str
-    
+
     @validator('endpoint', 'embedding_endpoint')
     def validate_endpoints(cls, v):
         if not v or not v.startswith('https://'):
@@ -310,7 +341,7 @@ class ValidationConfig(BaseModel):
     max_embedding_tokens: int = 8191
     min_text_length: int = 10
     max_text_length: int = 32000
-    
+
     @validator('max_embedding_tokens')
     def validate_token_limit(cls, v):
         if v <= 0:
@@ -319,18 +350,18 @@ class ValidationConfig(BaseModel):
 
 class ClusteringConfig:
     """Clustering configuration wrapper"""
-    
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-    
+
     @property
     def hdbscan(self) -> Dict[str, Any]:
         return self.config.get('hdbscan', {})
-    
+
     @property
     def umap(self) -> Dict[str, Any]:
         return self.config.get('umap', {})
-    
+
     @property
     def domain_grouping(self) -> Dict[str, Any]:
         """Get domain grouping configuration"""
@@ -340,12 +371,12 @@ class ClusteringConfig:
             'min_incidents_per_domain': 5,
             'similarity_threshold': 0.7
         })
-    
+
     @property
     def max_domains(self) -> int:
         """Get max domains - backward compatibility"""
         return self.domain_grouping.get('max_domains_per_tech_center', 20)
-    
+
     @property
     def min_incidents_per_domain(self) -> int:
         """Get min incidents per domain - backward compatibility"""
@@ -353,10 +384,10 @@ class ClusteringConfig:
 
 class TrainingConfig:
     """Training configuration wrapper for cumulative training"""
-    
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-    
+
     @property
     def schedule(self) -> Dict[str, Any]:
         """Get training schedule configuration"""
@@ -365,22 +396,22 @@ class TrainingConfig:
             'months': [6, 12],
             'training_window_months': 24
         })
-    
+
     @property
     def frequency(self) -> str:
         """Get training frequency"""
         return self.schedule.get('frequency', 'semi_annual')
-    
+
     @property
     def training_window_months(self) -> int:
         """Get training window in months (cumulative approach)"""
         return self.schedule.get('training_window_months', 24)
-    
+
     @property
     def parameters(self) -> Dict[str, Any]:
         """Get training parameters"""
         return self.config.get('parameters', {})
-    
+
     @property
     def versioning(self) -> Dict[str, Any]:
         """Get model versioning configuration"""
@@ -389,7 +420,7 @@ class TrainingConfig:
             'hash_algorithm': 'sha256',
             'hash_length': 8
         })
-    
+
     @property
     def processing(self) -> Dict[str, Any]:
         """Get processing configuration"""
@@ -403,10 +434,10 @@ class TrainingConfig:
 
 class PredictionConfig:
     """Prediction configuration wrapper for real-time classification"""
-    
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-    
+
     @property
     def schedule(self) -> Dict[str, Any]:
         """Get prediction schedule configuration"""
@@ -415,17 +446,17 @@ class PredictionConfig:
             'batch_size': 500,
             'timeout_minutes': 30
         })
-    
+
     @property
     def frequency_minutes(self) -> int:
         """Get prediction frequency in minutes"""
         return self.schedule.get('frequency_minutes', 120)
-    
+
     @property
     def batch_size(self) -> int:
         """Get prediction batch size"""
         return self.schedule.get('batch_size', 500)
-    
+
     @property
     def model_loading(self) -> Dict[str, Any]:
         """Get model loading configuration"""
@@ -436,7 +467,7 @@ class PredictionConfig:
             'fallback_version': '2024_q4',
             'preload_models': True
         })
-    
+
     @property
     def parameters(self) -> Dict[str, Any]:
         """Get prediction parameters"""
@@ -493,16 +524,27 @@ class LoggingConfig(BaseModel):
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     handlers: Dict[str, Dict[str, Any]]
 
+class PreprocessingConfig(BaseModel):
+    """Configuration for text preprocessing"""
+    text_columns_to_process: List[str] = ["description", "short_description", "business_service"]
+    text_column_for_summary_input: Optional[str] = "combined_text_for_summary"
+    summary_column_name: Optional[str] = "combined_incidents_summary"
+    processing_version: Optional[str] = "v2.0.0"
+    tech_center_mapping: Dict[str, str] = {}
+    default_tech_center: Optional[str] = "BT-TC-General"
+    clean_text: Dict[str, Any] = {}  # Changed from Dict[str, bool] to Dict[str, Any] to accept mixed types
+    summarization: Dict[str, Any] = {}
+
 # Global configuration instance
 _config_instance = None
 
 def load_config(config_path: Optional[str] = None) -> Config:
     """Load configuration, using cached instance if available"""
     global _config_instance
-    
+
     if _config_instance is None or config_path is not None:
         _config_instance = Config(config_path)
-    
+
     return _config_instance
 
 def get_config() -> Config:
@@ -526,7 +568,7 @@ def get_current_quarter() -> str:
     """Get current quarter based on current month"""
     import datetime
     current_month = datetime.datetime.now().month
-    
+
     if current_month in [1, 2, 3]:
         return 'q1'
     elif current_month in [4, 5, 6]:

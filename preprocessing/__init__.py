@@ -1,17 +1,16 @@
 # preprocessing/__init__.py
 """
-Preprocessing modules for HDBSCAN clustering pipeline.
-Provides text processing, embedding generation, and preprocessing orchestration.
+Preprocessing package for incident data
 """
 
+# Import only what's needed and avoid circular imports
 from .text_processing import TextProcessor
 from .embedding_generation import EmbeddingGenerator
-from .embedding_preprocessor import EmbeddingProcessor
-from .orchestrator import PreprocessingOrchestrator
+
+# Comment out or remove problematic imports that cause circular dependencies
+# from .embedding_preprocessor import EmbeddingProcessor
 
 __all__ = [
     'TextProcessor',
-    'EmbeddingGenerator', 
-    'EmbeddingProcessor',
-    'PreprocessingOrchestrator'
+    'EmbeddingGenerator'
 ]

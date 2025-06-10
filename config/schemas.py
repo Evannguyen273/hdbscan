@@ -1,294 +1,239 @@
 """
-Schema definitions for HDBSCAN Pipeline
-Provides Pydantic models for data validation and documentation
+Schema definitions for HDBSCAN Training Pipeline
+Updated to match config.yaml structure and training pipeline requirements
 """
 
-from pydantic import BaseModel, field_validator
-from typing import List, Optional, Dict, Any
-from datetime import datetime
+from google.cloud import bigquery
+from typing import List, Dict, Any
 
-class IncidentSchema(BaseModel):
-    """Schema for incident data"""
-    incident_number: str
-    description: str
-    created_date: datetime
-    tech_center: str
-    embedding: Optional[List[float]] = None
-    summary: Optional[str] = None
+def get_schema_from_config(config: Dict[str, Any], schema_name: str) -> List[bigquery.SchemaField]:
+    """
+    Convert schema definition from config to BigQuery SchemaField objects
     
-    @field_validator('incident_number')
-    @classmethod
-    def validate_incident_number(cls, v):
-        """Validate incident number is not empty and strip whitespace"""
-        if not v or not v.strip():
-            raise ValueError("Incident number cannot be empty")
-        return v.strip()
+    Args:
+        config: Configuration dictionary
+        schema_name: Name of the schema in config.bigquery.schemas
+        
+    Returns:
+        List of BigQuery SchemaField objects
+    """
+    schema_config = config.get('bigquery', {}).get('schemas', {}).get(schema_name, [])
     
-    @field_validator('description')
-    @classmethod
-    def validate_description(cls, v):
-        """Validate description has minimum length and strip whitespace"""
-        if not v or len(v.strip()) < 10:
-            raise ValueError("Description must be at least 10 characters")
-        return v.strip()
-
-class PreprocessedIncidentSchema(BaseModel):
-    """Schema for preprocessed incident data with embeddings"""
-    incident_number: str
-    tech_center: str
-    description_summary: str
-    embedding: List[float]
-    preprocessing_version: str
-    created_timestamp: datetime
+    schema_fields = []
+    for field_config in schema_config:
+        # Handle repeated fields (like embeddings)
+        if field_config.get('mode') == 'REPEATED':
+            if 'fields' in field_config:
+                # Nested repeated field (like embedding with subfields)
+                subfields = []
+                for subfield in field_config['fields']:
+                    subfields.append(bigquery.SchemaField(
+                        subfield['name'], 
+                        subfield['type'], 
+                        mode=subfield.get('mode', 'NULLABLE')
+                    ))
+                schema_fields.append(bigquery.SchemaField(
+                    field_config['name'],
+                    'RECORD',
+                    mode='REPEATED',
+                    fields=subfields
+                ))
+            else:
+                # Simple repeated field (like float array)
+                schema_fields.append(bigquery.SchemaField(
+                    field_config['name'],
+                    field_config['type'],
+                    mode='REPEATED'
+                ))
+        else:
+            # Regular field
+            schema_fields.append(bigquery.SchemaField(
+                field_config['name'],
+                field_config['type'],
+                mode=field_config.get('mode', 'NULLABLE')
+            ))
     
-    @field_validator('embedding')
-    @classmethod
-    def validate_embedding(cls, v):
-        """Validate embedding is not empty and contains only numeric values"""
-        if not v or len(v) == 0:
-            raise ValueError("Embedding cannot be empty")
-        if not all(isinstance(x, (int, float)) for x in v):
-            raise ValueError("Embedding must contain only numeric values")
-        return v
+    return schema_fields
 
-class TrainingDataSchema(BaseModel):
-    """Schema for training dataset"""
-    incident_number: str
-    tech_center: str
-    description_summary: str
-    embedding: List[float]
-    training_version: str
-    created_timestamp: datetime
+# Training Cycle Metadata Schema (for multi-tech center orchestration)
+TRAINING_CYCLE_METADATA_SCHEMA = [
+    bigquery.SchemaField("training_cycle_id", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("tech_center", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("tech_center_slug", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("training_month", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("training_year", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("training_completed_date", "TIMESTAMP", mode="NULLABLE"),
+    bigquery.SchemaField("umap_artifact_path", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("hdbscan_artifact_path", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("metadata_artifact_path", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("cluster_results_table", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("embeddings_source_table", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("model_version", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("model_hash", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("clusters_count", "INTEGER", mode="NULLABLE"),
+    bigquery.SchemaField("domains_count", "INTEGER", mode="NULLABLE"),
+    bigquery.SchemaField("incidents_count", "INTEGER", mode="NULLABLE"),
+    bigquery.SchemaField("silhouette_score", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("noise_ratio", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("training_status", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("error_message", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("created_timestamp", "TIMESTAMP", mode="REQUIRED"),
+]
 
-class ClusterResultSchema(BaseModel):
-    """Schema for clustering results"""
-    incident_number: str
-    tech_center: str
-    cluster_id: int
-    confidence_score: Optional[float] = None
-    model_version: str
-    prediction_timestamp: datetime
-    domain_group: Optional[str] = None
+# Cluster Results Schema (versioned tables: cluster_results_{version}_{hash})
+CLUSTER_RESULTS_SCHEMA = [
+    bigquery.SchemaField("number", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("sys_created_on", "TIMESTAMP", mode="REQUIRED"),
+    bigquery.SchemaField("combined_incidents_summary", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("tech_center", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("cluster_id", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("cluster_label", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("cluster_description", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("domain_id", "INTEGER", mode="NULLABLE"),
+    bigquery.SchemaField("domain_name", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("umap_x", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("umap_y", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("model_version", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("model_hash", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("prediction_timestamp", "TIMESTAMP", mode="REQUIRED"),
+]
+
+# Preprocessed Incidents Schema (with embeddings stored here)
+PREPROCESSED_INCIDENTS_SCHEMA = [
+    bigquery.SchemaField("number", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("sys_created_on", "TIMESTAMP", mode="REQUIRED"),
+    bigquery.SchemaField("combined_incidents_summary", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("embedding", "FLOAT", mode="REPEATED"),
+    bigquery.SchemaField("created_timestamp", "TIMESTAMP", mode="REQUIRED"),
+    bigquery.SchemaField("processing_version", "STRING", mode="REQUIRED"),
+]
+
+# Model Registry Schema
+MODEL_REGISTRY_SCHEMA = [
+    bigquery.SchemaField("model_version", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("tech_center", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("model_type", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("training_data_start", "DATE", mode="REQUIRED"),
+    bigquery.SchemaField("training_data_end", "DATE", mode="REQUIRED"),
+    bigquery.SchemaField("blob_path", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("created_timestamp", "TIMESTAMP", mode="REQUIRED"),
+    bigquery.SchemaField("model_params", "JSON", mode="NULLABLE"),
+    bigquery.SchemaField("cluster_count", "INTEGER", mode="NULLABLE"),
+    bigquery.SchemaField("silhouette_score", "FLOAT", mode="NULLABLE"),
+]
+
+# Training Logs Schema
+TRAINING_LOGS_SCHEMA = [
+    bigquery.SchemaField("run_id", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("timestamp", "TIMESTAMP", mode="REQUIRED"),
+    bigquery.SchemaField("pipeline_stage", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("tech_center", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("model_version", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("log_level", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("message", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("details", "JSON", mode="NULLABLE"),
+]
+
+# Watermarks Schema
+WATERMARKS_SCHEMA = [
+    bigquery.SchemaField("pipeline_name", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("tech_center", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("last_processed_timestamp", "TIMESTAMP", mode="NULLABLE"),
+    bigquery.SchemaField("last_processed_id", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("updated_at", "TIMESTAMP", mode="REQUIRED"),
+]
+
+# Incident Predictions Schema (for live predictions)
+INCIDENT_PREDICTIONS_SCHEMA = [
+    bigquery.SchemaField("incident_id", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("predicted_cluster_id", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("predicted_cluster_label", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("confidence_score", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("predicted_domain_id", "INTEGER", mode="NULLABLE"),
+    bigquery.SchemaField("predicted_domain_name", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("tech_center", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("prediction_timestamp", "TIMESTAMP", mode="REQUIRED"),
+    bigquery.SchemaField("model_table_used", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("blob_model_path", "STRING", mode="NULLABLE"),
+]
+
+# Preprocessing Watermarks Schema
+PREPROCESSING_WATERMARKS_SCHEMA = [
+    bigquery.SchemaField("preprocessed_rows", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("time_trigger", "TIMESTAMP", mode="REQUIRED"),
+    bigquery.SchemaField("run_details", "JSON", mode="NULLABLE"),
+]
+
+# Schema mapping for easy access
+SCHEMA_MAPPING = {
+    'training_cycle_metadata': TRAINING_CYCLE_METADATA_SCHEMA,
+    'cluster_results': CLUSTER_RESULTS_SCHEMA,
+    'preprocessed_incidents': PREPROCESSED_INCIDENTS_SCHEMA,
+    'model_registry': MODEL_REGISTRY_SCHEMA,
+    'training_logs': TRAINING_LOGS_SCHEMA,
+    'watermarks': WATERMARKS_SCHEMA,
+    'incident_predictions': INCIDENT_PREDICTIONS_SCHEMA,
+    'preprocessing_watermarks': PREPROCESSING_WATERMARKS_SCHEMA,
+}
+
+def get_schema_by_name(schema_name: str) -> List[bigquery.SchemaField]:
+    """
+    Get BigQuery schema by name
     
-    @field_validator('cluster_id')
-    @classmethod
-    def validate_cluster_id(cls, v):
-        """Validate cluster ID is >= -1 (HDBSCAN allows -1 for noise clusters)"""
-        if v < -1:  # -1 is noise cluster in HDBSCAN
-            raise ValueError("Cluster ID must be >= -1")
-        return v
-
-class PredictionResultSchema(BaseModel):
-    """Schema for prediction results"""
-    incident_number: str
-    predicted_cluster: int
-    confidence_score: float
-    tech_center: str
-    model_version: str
-    prediction_timestamp: datetime
-    domain_group: Optional[str] = None
+    Args:
+        schema_name: Name of the schema
+        
+    Returns:
+        List of BigQuery SchemaField objects
+        
+    Raises:
+        ValueError: If schema name is not found
+    """
+    if schema_name not in SCHEMA_MAPPING:
+        available_schemas = list(SCHEMA_MAPPING.keys())
+        raise ValueError(f"Schema '{schema_name}' not found. Available: {available_schemas}")
     
-    @field_validator('confidence_score')
-    @classmethod
-    def validate_confidence(cls, v):
-        """Validate confidence score is between 0 and 1"""
-        if not 0.0 <= v <= 1.0:
-            raise ValueError("Confidence score must be between 0 and 1")
-        return v
+    return SCHEMA_MAPPING[schema_name]
 
-class ModelRegistrySchema(BaseModel):
-    """Schema for model registry entries"""
-    model_version: str
-    tech_center: str
-    model_type: str  # 'hdbscan', 'umap', 'domain_grouper'
-    training_data_start: datetime
-    training_data_end: datetime
-    blob_path: str
-    created_timestamp: datetime
-    model_params: Optional[Dict[str, Any]] = None
-    cluster_count: Optional[int] = None
-    silhouette_score: Optional[float] = None
+def create_table_if_not_exists(client: bigquery.Client, table_id: str, schema_name: str, 
+                              partition_field: str = None, cluster_fields: List[str] = None) -> bool:
+    """
+    Create BigQuery table if it doesn't exist
     
-    @field_validator('model_type')
-    @classmethod
-    def validate_model_type(cls, v):
-        """Validate model type is one of the allowed types"""
-        allowed_types = ['hdbscan', 'umap', 'domain_grouper', 'preprocessor']
-        if v not in allowed_types:
-            raise ValueError(f"Model type must be one of: {allowed_types}")
-        return v
-
-class ModelMetricsSchema(BaseModel):
-    """Schema for model performance metrics"""
-    model_version: str
-    tech_center: str
-    cluster_count: int
-    noise_ratio: float
-    silhouette_score: Optional[float] = None
-    calinski_harabasz_score: Optional[float] = None
-    davies_bouldin_score: Optional[float] = None
-    training_incidents_count: int
-    training_duration_seconds: float
-    
-    @field_validator('noise_ratio')
-    @classmethod
-    def validate_noise_ratio(cls, v):
-        """Validate noise ratio is between 0 and 1"""
-        if not 0.0 <= v <= 1.0:
-            raise ValueError("Noise ratio must be between 0 and 1")
-        return v
-
-class ValidationResultSchema(BaseModel):
-    """Schema for text validation results"""
-    incident_number: str
-    is_valid: bool
-    failure_reason: Optional[str] = None
-    estimated_tokens: Optional[int] = None
-    text_length: Optional[int] = None
-
-class EmbeddingBatchSchema(BaseModel):
-    """Schema for embedding generation batch"""
-    batch_id: str
-    incidents: List[IncidentSchema]
-    total_count: int
-    valid_count: int
-    failed_count: int
-    processing_timestamp: datetime
-    
-    @field_validator('valid_count', 'failed_count')
-    @classmethod
-    def validate_counts(cls, v, info):
-        """Validate that counts do not exceed total count"""
-        if info.data and 'total_count' in info.data and v > info.data['total_count']:
-            raise ValueError("Count cannot exceed total count")
-        return v
-
-class TrainingLogSchema(BaseModel):
-    """Schema for training log entries"""
-    run_id: str
-    timestamp: datetime
-    pipeline_stage: Optional[str] = None
-    tech_center: Optional[str] = None
-    model_version: Optional[str] = None
-    log_level: str
-    message: str
-    details: Optional[Dict[str, Any]] = None
-    
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-class WatermarkSchema(BaseModel):
-    """Schema for processing watermarks"""
-    pipeline_name: str
-    tech_center: str
-    last_processed_timestamp: Optional[datetime] = None
-    last_processed_id: Optional[str] = None
-    updated_at: datetime
-    
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-class VersionedTrainingResultSchema(BaseModel):
-    """Schema for versioned training results (clustering_predictions_{version}_{hash})"""
-    incident_number: str
-    cluster_id: int
-    cluster_label: Optional[str] = None
-    domain_id: Optional[int] = None
-    domain_name: Optional[str] = None
-    umap_x: Optional[float] = None
-    umap_y: Optional[float] = None
-    tech_center: str
-    model_version: str
-    confidence_score: Optional[float] = None
-    created_timestamp: datetime
-    
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-class IncidentPredictionSchema(BaseModel):
-    """Schema for live incident predictions"""
-    incident_id: str
-    predicted_cluster_id: int
-    predicted_cluster_label: Optional[str] = None
-    confidence_score: Optional[float] = None
-    predicted_domain_id: Optional[int] = None
-    predicted_domain_name: Optional[str] = None
-    tech_center: str
-    prediction_timestamp: datetime
-    model_table_used: Optional[str] = None
-    blob_model_path: Optional[str] = None
-    
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-# Utility functions for schema validation
-def validate_incident_batch(incidents: List[Dict]) -> List[ValidationResultSchema]:
-    """Validate a batch of incidents and return validation results"""
-    results = []
-    
-    for incident in incidents:
+    Args:
+        client: BigQuery client
+        table_id: Full table ID (project.dataset.table)
+        schema_name: Schema name from SCHEMA_MAPPING
+        partition_field: Field to partition by (optional)
+        cluster_fields: Fields to cluster by (optional)
+        
+    Returns:
+        True if table was created or already exists
+    """
+    try:
+        # Check if table exists
+        client.get_table(table_id)
+        return True
+    except Exception:
+        # Table doesn't exist, create it
         try:
-            IncidentSchema(**incident)
-            results.append(ValidationResultSchema(
-                incident_number=incident.get('incident_number', 'unknown'),
-                is_valid=True
-            ))
+            schema = get_schema_by_name(schema_name)
+            table = bigquery.Table(table_id, schema=schema)
+            
+            # Add partitioning if specified
+            if partition_field:
+                table.time_partitioning = bigquery.TimePartitioning(
+                    type_=bigquery.TimePartitioningType.DAY,
+                    field=partition_field
+                )
+            
+            # Add clustering if specified
+            if cluster_fields:
+                table.clustering_fields = cluster_fields
+            
+            table = client.create_table(table)
+            return True
+            
         except Exception as e:
-            results.append(ValidationResultSchema(
-                incident_number=incident.get('incident_number', 'unknown'),
-                is_valid=False,
-                failure_reason=str(e)
-            ))
-    
-    return results
-
-def get_bigquery_schema(schema_name: str) -> List[Dict]:
-    """Get BigQuery schema definition for a given schema"""
-    schema_mapping = {
-        'incidents': [
-            {'name': 'incident_number', 'type': 'STRING', 'mode': 'REQUIRED'},
-            {'name': 'description', 'type': 'STRING', 'mode': 'REQUIRED'},
-            {'name': 'created_date', 'type': 'TIMESTAMP', 'mode': 'REQUIRED'},
-            {'name': 'tech_center', 'type': 'STRING', 'mode': 'REQUIRED'},
-        ],
-        'preprocessed_incidents': [
-            {'name': 'incident_number', 'type': 'STRING', 'mode': 'REQUIRED'},
-            {'name': 'tech_center', 'type': 'STRING', 'mode': 'REQUIRED'},
-            {'name': 'description_summary', 'type': 'STRING', 'mode': 'NULLABLE'},
-            {'name': 'embedding', 'type': 'REPEATED', 'mode': 'NULLABLE',
-             'fields': [{'name': 'value', 'type': 'FLOAT'}]},
-            {'name': 'preprocessing_version', 'type': 'STRING', 'mode': 'REQUIRED'},
-            {'name': 'created_timestamp', 'type': 'TIMESTAMP', 'mode': 'REQUIRED'},
-        ],
-        'cluster_results': [
-            {'name': 'incident_number', 'type': 'STRING', 'mode': 'REQUIRED'},
-            {'name': 'tech_center', 'type': 'STRING', 'mode': 'REQUIRED'},
-            {'name': 'cluster_id', 'type': 'INTEGER', 'mode': 'REQUIRED'},
-            {'name': 'confidence_score', 'type': 'FLOAT', 'mode': 'NULLABLE'},
-            {'name': 'model_version', 'type': 'STRING', 'mode': 'REQUIRED'},
-            {'name': 'prediction_timestamp', 'type': 'TIMESTAMP', 'mode': 'REQUIRED'},
-            {'name': 'domain_group', 'type': 'STRING', 'mode': 'NULLABLE'},
-        ],
-        'model_registry': [
-            {'name': 'model_version', 'type': 'STRING', 'mode': 'REQUIRED'},
-            {'name': 'tech_center', 'type': 'STRING', 'mode': 'REQUIRED'},
-            {'name': 'model_type', 'type': 'STRING', 'mode': 'REQUIRED'},
-            {'name': 'training_data_start', 'type': 'DATE', 'mode': 'REQUIRED'},
-            {'name': 'training_data_end', 'type': 'DATE', 'mode': 'REQUIRED'},
-            {'name': 'blob_path', 'type': 'STRING', 'mode': 'REQUIRED'},
-            {'name': 'created_timestamp', 'type': 'TIMESTAMP', 'mode': 'REQUIRED'},
-            {'name': 'model_params', 'type': 'JSON', 'mode': 'NULLABLE'},
-            {'name': 'cluster_count', 'type': 'INTEGER', 'mode': 'NULLABLE'},
-            {'name': 'silhouette_score', 'type': 'FLOAT', 'mode': 'NULLABLE'},
-        ]
-    }
-    
-    return schema_mapping.get(schema_name, [])
+            print(f"Failed to create table {table_id}: {e}")
+            return False

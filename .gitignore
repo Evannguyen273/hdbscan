@@ -5,7 +5,7 @@
 .env.staging
 
 # Configuration files that contain sensitive information
-config/config.py
+# config/config.py
 config/config.yaml
 config/enhanced_config.yaml
 config/local_config.yaml

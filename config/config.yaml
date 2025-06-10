@@ -37,7 +37,7 @@ azure:
       backups: "backups/{version}/"
 
 # ===================================================================
-# BIGQUERY CONFIGURATION  
+# BIGQUERY CONFIGURATION
 # ===================================================================
 bigquery:
   project_id: "enterprise-dashboardnp-cd35"
@@ -51,58 +51,98 @@ bigquery:
       # Source table for training data (updated for your specific table)
     incident_source: "enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.oa_snow_incident_mgmt_srv_dev"
     raw_incidents: "enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.oa_snow_incident_mgmt_srv_dev"
-    
+
     # Pipeline tables - HYBRID STORAGE ARCHITECTURE
-    preprocessed_incidents: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.preprocessed_incidents"
+    preprocessed_incidents: "enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.preprocessed_incidents"
     # ^ Contains: embeddings, summaries, metadata (HIGH cost but necessary)
-    
+
     # Versioned training results (NO embeddings for cost optimization)
     training_results_template: "clustering_predictions_{version}_{hash}"
-    training_data: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.training_data"
+    training_data: "enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.training_data"
     # ^ Example: clustering_predictions_2025_q2_789abc12
-    
+
     # Live predictions (NO embeddings)
-    predictions: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.incident_predictions"
+    predictions: "enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.incident_predictions"    # Model tracking
+    model_registry: "enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.model_registry"
     
-    # Model tracking
-    model_registry: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.model_registry"
-    
+    # NEW: Training cycle metadata for 6-month cycles across all tech centers
+    training_cycle_metadata: "enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.training_cycle_metadata"
+
     # Operational tables (BigQuery)
-    training_logs: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.training_logs"
-    watermarks: "enterprise-dashboardnp-cd35.bigquery_datasets_home_srv_dev.preprocessing_watermarks"
+    training_logs: "enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.training_logs"
+    watermarks: "enterprise-dashboardnp-cd35.bigquery_datasets_hone_srv_dev.preprocessing_watermarks"
   # SQL Query templates to eliminate hardcoded queries
   queries:
-    # New query for preprocessing pipeline input
+    # Simplified query template that uses parameters provided by the preprocessing pipeline
     incident_data_for_preprocessing: |
-      SELECT 
+      SELECT
         number,
         sys_created_on,
         description,
         short_description,
         business_service
       FROM `{source_table}`
-      WHERE sys_created_on >= '{start_date}' 
-      AND sys_created_on <= '{end_date}'
-      ORDER BY sys_created_on DESC
-    
+      WHERE sys_created_on >= '{start_time}'
+      AND sys_created_on <= '{end_time}'
+      ORDER BY sys_created_on ASC    # Training data query with tech center filtering
     training_data_window: |
-      SELECT incident_number, description, created_date, tech_center
-      FROM `{source_table}`
-      WHERE created_date >= '{start_date}' 
-      AND created_date < '{end_date}'
-      AND tech_center IN UNNEST(@tech_centers)
-    
+      SELECT
+        p.number,
+        t.TechCenter as tech_center,
+        p.sys_created_on,
+        p.combined_incidents_summary,
+        p.embedding
+      FROM `{preprocessed_incidents_table}` p
+      LEFT JOIN `{team_services_table}` t
+      ON t.business_service = p.business_service
+      WHERE p.sys_created_on >= '{start_date}'
+      AND p.sys_created_on <= '{end_date}'
+      AND t.TechCenter = '{tech_center}'
+      AND p.embedding IS NOT NULL
+      AND ARRAY_LENGTH(p.embedding) > 0
+      ORDER BY p.sys_created_on DESC
+
     model_registry_insert: |
-      INSERT INTO `{table}` (model_version, tech_center, model_type, training_data_start, 
+      INSERT INTO `{table}` (model_version, tech_center, model_type, training_data_start,
                             training_data_end, blob_path, created_timestamp, model_params)
-      VALUES (@model_version, @tech_center, @model_type, @training_data_start, 
-              @training_data_end, @blob_path, @created_timestamp, @model_params)
-    
-    cluster_results_insert: |
-      INSERT INTO `{table}` (incident_number, tech_center, cluster_id, confidence_score, 
-                            model_version, prediction_timestamp, domain_group)
-      VALUES (@incident_number, @tech_center, @cluster_id, @confidence_score, 
-              @model_version, @prediction_timestamp, @domain_group)
+      VALUES (@model_version, @tech_center, @model_type, @training_data_start,
+              @training_data_end, @blob_path, @created_timestamp, @model_params)    # Training cycle metadata query for model lookup
+    get_latest_model_for_tech_center: |
+      SELECT 
+        umap_artifact_path,
+        hdbscan_artifact_path,
+        metadata_artifact_path,
+        model_version,
+        model_hash,
+        cluster_results_table,
+        embeddings_source_table
+      FROM `{training_cycle_metadata_table}`
+      WHERE tech_center = '{tech_center}'
+        AND training_status = 'SUCCESS'
+      ORDER BY training_completed_date DESC
+      LIMIT 1
+
+    # Insert new training cycle metadata
+    training_cycle_metadata_insert: |
+      INSERT INTO `{table}` (
+        training_cycle_id, tech_center, tech_center_slug, training_month, training_year,
+        training_completed_date, umap_artifact_path, hdbscan_artifact_path, 
+        metadata_artifact_path, cluster_results_table, embeddings_source_table,
+        model_version, model_hash, clusters_count, domains_count, incidents_count,
+        silhouette_score, noise_ratio, training_status, error_message, created_timestamp
+      ) VALUES (
+        @training_cycle_id, @tech_center, @tech_center_slug, @training_month, @training_year,
+        @training_completed_date, @umap_artifact_path, @hdbscan_artifact_path,
+        @metadata_artifact_path, @cluster_results_table, @embeddings_source_table,
+        @model_version, @model_hash, @clusters_count, @domains_count, @incidents_count,
+        @silhouette_score, @noise_ratio, @training_status, @error_message, @created_timestamp
+      )
+
+    # Simple query for getting latest sys_created_on timestamp for preprocessing
+    get_watermark_for_preprocessing: |
+      SELECT MAX(sys_created_on) as last_processed_timestamp
+      FROM `{table_id}`
+      {tech_center_filter}
 
   # Schema definitions for table creation
   schemas:
@@ -122,27 +162,33 @@ bigquery:
       - {name: "number", type: "STRING", mode: "REQUIRED"}
       - {name: "sys_created_on", type: "TIMESTAMP", mode: "REQUIRED"}
       - {name: "combined_incidents_summary", type: "STRING", mode: "NULLABLE"}
-      - {name: "embedding", type: "REPEATED", mode: "NULLABLE", fields: [{name: "value", type: "FLOAT"}]}
+      - {name: "embedding", type: "FLOAT", mode: "REPEATED"}  # Fixed: type should be FLOAT, mode REPEATED
       - {name: "created_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
       - {name: "processing_version", type: "STRING", mode: "REQUIRED"}
-    
+
     training_data:
       - {name: "incident_number", type: "STRING", mode: "REQUIRED"}
       - {name: "tech_center", type: "STRING", mode: "REQUIRED"}
       - {name: "description_summary", type: "STRING", mode: "NULLABLE"}
       - {name: "embedding", type: "REPEATED", mode: "NULLABLE", fields: [{name: "value", type: "FLOAT"}]}
       - {name: "training_version", type: "STRING", mode: "REQUIRED"}
-      - {name: "created_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
-    
+      - {name: "created_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}    # Schema for versioned training results tables (cluster_results_{version}_{hash})
     cluster_results:
-      - {name: "incident_number", type: "STRING", mode: "REQUIRED"}
+      - {name: "number", type: "STRING", mode: "REQUIRED"}
+      - {name: "sys_created_on", type: "TIMESTAMP", mode: "REQUIRED"}
+      - {name: "combined_incidents_summary", type: "STRING", mode: "NULLABLE"}
       - {name: "tech_center", type: "STRING", mode: "REQUIRED"}
       - {name: "cluster_id", type: "INTEGER", mode: "REQUIRED"}
-      - {name: "confidence_score", type: "FLOAT", mode: "NULLABLE"}
+      - {name: "cluster_label", type: "STRING", mode: "NULLABLE"}
+      - {name: "cluster_description", type: "STRING", mode: "NULLABLE"}
+      - {name: "domain_id", type: "INTEGER", mode: "NULLABLE"}
+      - {name: "domain_name", type: "STRING", mode: "NULLABLE"}
+      - {name: "umap_x", type: "FLOAT", mode: "NULLABLE"}
+      - {name: "umap_y", type: "FLOAT", mode: "NULLABLE"}
       - {name: "model_version", type: "STRING", mode: "REQUIRED"}
+      - {name: "model_hash", type: "STRING", mode: "REQUIRED"}
       - {name: "prediction_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
-      - {name: "domain_group", type: "STRING", mode: "NULLABLE"}
-    
+
     # ADD SCHEMAS FOR OPERATIONAL TABLES
     training_logs:
       - {name: "run_id", type: "STRING", mode: "REQUIRED"}
@@ -160,7 +206,7 @@ bigquery:
       - {name: "last_processed_timestamp", type: "TIMESTAMP", mode: "NULLABLE"}
       - {name: "last_processed_id", type: "STRING", mode: "NULLABLE"}
       - {name: "updated_at", type: "TIMESTAMP", mode: "REQUIRED"}
-      
+
     # Schema for versioned training results tables (clustering_predictions_{version}_{hash})
     versioned_training_results:
       - {name: "incident_number", type: "STRING", mode: "REQUIRED"}
@@ -174,7 +220,7 @@ bigquery:
       - {name: "model_version", type: "STRING", mode: "REQUIRED"}
       - {name: "confidence_score", type: "FLOAT", mode: "NULLABLE"}
       - {name: "created_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
-    
+
     # Schema for live incident predictions
     incident_predictions:
       - {name: "incident_id", type: "STRING", mode: "REQUIRED"}
@@ -188,6 +234,33 @@ bigquery:
       - {name: "model_table_used", type: "STRING", mode: "NULLABLE"}
       - {name: "blob_model_path", type: "STRING", mode: "NULLABLE"}
 
+    preprocessing_watermarks:
+      - {name: "preprocessed_rows", type: "INTEGER", mode: "REQUIRED"}
+      - {name: "time_trigger", type: "TIMESTAMP", mode: "REQUIRED"}
+      - {name: "run_details", type: "JSON", mode: "NULLABLE"}    # NEW: Training cycle metadata schema (optimized - no duplicate embeddings)
+    training_cycle_metadata:
+      - {name: "training_cycle_id", type: "STRING", mode: "REQUIRED"}  # e.g., "2024_q4"
+      - {name: "tech_center", type: "STRING", mode: "REQUIRED"}
+      - {name: "tech_center_slug", type: "STRING", mode: "REQUIRED"}
+      - {name: "training_month", type: "INTEGER", mode: "REQUIRED"}  # 6 or 12
+      - {name: "training_year", type: "INTEGER", mode: "REQUIRED"}
+      - {name: "training_completed_date", type: "TIMESTAMP", mode: "REQUIRED"}
+      - {name: "umap_artifact_path", type: "STRING", mode: "REQUIRED"}
+      - {name: "hdbscan_artifact_path", type: "STRING", mode: "REQUIRED"}
+      - {name: "metadata_artifact_path", type: "STRING", mode: "REQUIRED"}
+      - {name: "cluster_results_table", type: "STRING", mode: "REQUIRED"}
+      - {name: "embeddings_source_table", type: "STRING", mode: "REQUIRED"}  # Reference to BigQuery table
+      - {name: "model_version", type: "STRING", mode: "REQUIRED"}
+      - {name: "model_hash", type: "STRING", mode: "REQUIRED"}
+      - {name: "clusters_count", type: "INTEGER", mode: "NULLABLE"}
+      - {name: "domains_count", type: "INTEGER", mode: "NULLABLE"}
+      - {name: "incidents_count", type: "INTEGER", mode: "NULLABLE"}
+      - {name: "silhouette_score", type: "FLOAT", mode: "NULLABLE"}
+      - {name: "noise_ratio", type: "FLOAT", mode: "NULLABLE"}
+      - {name: "training_status", type: "STRING", mode: "REQUIRED"}  # SUCCESS, FAILED, RUNNING
+      - {name: "error_message", type: "STRING", mode: "NULLABLE"}
+      - {name: "created_timestamp", type: "TIMESTAMP", mode: "REQUIRED"}
+
 # ===================================================================
 # PREPROCESSING CONFIGURATION
 # ===================================================================
@@ -196,10 +269,10 @@ preprocessing:
   text_columns_to_process: ["description", "short_description", "business_service"]
   text_column_for_summary_input: "combined_text_for_summary"
   summary_column_name: "combined_incidents_summary"
-  
+
   # Processing version for tracking
   processing_version: "v2.0.0"
-  
+
   # Tech center mapping (business_service -> tech_center)
   tech_center_mapping:
     "Data Analytics": "BT-TC-Data Analytics"
@@ -211,7 +284,7 @@ preprocessing:
     "Enterprise Applications": "BT-TC-Enterprise Applications"
     # Add more mappings as needed
   default_tech_center: "BT-TC-General"
-  
+
   # Text cleaning settings
   clean_text:
     remove_special_characters: true
@@ -229,14 +302,16 @@ preprocessing:
       Summarize the following incident information in exactly 30 words or less.
       Focus on: what issues occurred and which application/system was affected.
       Format: [Issue description] affecting [Application/System name].
-      
+
       Incident Details:
       {combined_text}
-      
+
       30-word Summary:
     model_name: "gpt-35-turbo"
     max_retries: 3
-    batch_size: 5
+    batch_size: 50
+    delay_between_batches: 0.5  # Add delay between batches to reduce rate limiting
+    max_parallel_requests: 5    # Limit parallel requests to Azure OpenAI
 
 # ===================================================================
 # TRAINING CONFIGURATION - CUMULATIVE APPROACH
@@ -247,7 +322,7 @@ training:
     frequency: "semi_annual"  # Every 6 months instead of quarterly
     months: [6, 12]  # June and December
     training_window_months: 24  # Always use 24-month datasets
-    
+
   # Training parameters optimized for large cumulative datasets
   parameters:
     # UMAP settings
@@ -257,7 +332,7 @@ training:
       min_dist: 0.1
       metric: "cosine"
       random_state: 42
-      
+
     # HDBSCAN settings
     hdbscan:
       min_cluster_size: 25  # Increased for larger datasets
@@ -265,19 +340,19 @@ training:
       cluster_selection_epsilon: 0.1
       metric: "euclidean"
       cluster_selection_method: "eom"
-      
+
     # Domain grouping
     domain_grouping:
       max_domains_per_tech_center: 20
       min_cluster_size_for_domain: 5
       similarity_threshold: 0.7
-      
+
   # Model versioning
   versioning:
     version_format: "{year}_q{quarter}"  # e.g., "2025_q2"
     hash_algorithm: "sha256"
     hash_length: 8
-    
+
   # Processing settings
   processing:
     parallel_tech_centers: true
@@ -295,7 +370,7 @@ prediction:
     frequency_minutes: 120  # Every 2 hours
     batch_size: 500
     timeout_minutes: 30
-    
+
   # Model management
   model_loading:
     cache_models: true
@@ -303,7 +378,7 @@ prediction:
     version_strategy: "latest"  # Use latest available version
     fallback_version: "2024_q4"  # Fallback if latest fails
     preload_models: true
-    
+
   # Prediction parameters
   parameters:
     min_confidence_score: 0.3
@@ -322,13 +397,13 @@ clustering:
     min_dist: 0.1
     metric: "cosine"
     random_state: 42
-    
+
   hdbscan:
     min_cluster_size: 25
     min_samples: 5
     metric: "euclidean"
     cluster_selection_epsilon: 0.1
-    
+
   # Quality thresholds
   quality:
     min_silhouette_score: 0.15
@@ -339,40 +414,67 @@ clustering:
 # TECH CENTERS CONFIGURATION
 # ===================================================================
 tech_centers:
-  # Primary tech centers with configuration
+  # All tech centers with consistent format
   primary:
-    - name: "BT-TC-Data Analytics"
-      slug: "bt-tc-data-analytics"
+    - name: "BT-TC-AI, Analytics & Data"
+      slug: "bt-tc-ai-analytics-data"
       min_incidents: 500
-      
-    - name: "BT-TC-Network Operations"
-      slug: "bt-tc-network-operations"
-      min_incidents: 1000
-      
-    - name: "BT-TC-Security Operations"
-      slug: "bt-tc-security-operations"
+
+    - name: "BT-TC-Core Platforms"
+      slug: "bt-tc-core-platforms"
+      min_incidents: 750
+
+    - name: "BT-TC-Global Tech Services"
+      slug: "bt-tc-global-tech-services"
       min_incidents: 800
-      
-    - name: "BT-TC-Infrastructure Services"
-      slug: "bt-tc-infrastructure-services"
+
+    - name: "BT-EF-Global CTO"
+      slug: "bt-ef-global-cto"
       min_incidents: 600
-      
-    - name: "BT-TC-Product Development Engineering"
+
+    - name: "BT-TC-Product Development & Engineering"
       slug: "bt-tc-product-development-engineering"
+      min_incidents: 700
+
+    - name: "BT-TC-Cyber Security"
+      slug: "bt-tc-cyber-security"
+      min_incidents: 600
+
+    - name: "BT-TC-Finance & Controlling"
+      slug: "bt-tc-finance-controlling"
+      min_incidents: 500
+
+    - name: "BT-EF-People"
+      slug: "bt-ef-people"
+      min_incidents: 450
+
+    - name: "BT-IF-Central People Organisation"
+      slug: "bt-if-central-people-organisation"
       min_incidents: 400
-      
-  # Additional tech centers (simplified)
-  additional:
-    - "BT-TC-Cloud Services"
-    - "BT-TC-Enterprise Applications"
-    - "BT-TC-Field Services"
-    - "BT-TC-Customer Support"
-    - "BT-TC-Quality Assurance"
-    - "BT-TC-DevOps Engineering"
-    - "BT-TC-Business Intelligence"
-    - "BT-TC-Systems Integration"
-    - "BT-TC-Mobile Solutions"
-    - "BT-TC-Compliance & Governance"
+
+    - name: "BT-IF-Sales"
+      slug: "bt-if-sales"
+      min_incidents: 450
+
+    - name: "BT-IF-Portfolio Brands"
+      slug: "bt-if-portfolio-brands"
+      min_incidents: 400
+
+    - name: "BT-IF-Product Organization"
+      slug: "bt-if-product-organization"
+      min_incidents: 500
+
+    - name: "BT-IF-Logistics"
+      slug: "bt-if-logistics"
+      min_incidents: 550
+
+    - name: "H&M Group"
+      slug: "hm-group"
+      min_incidents: 500
+
+    - name: "Central People Organization"
+      slug: "central-people-organization"
+      min_incidents: 450
 
 # ===================================================================
 # COST OPTIMIZATION - 50% REDUCTION STRATEGY
@@ -385,13 +487,13 @@ cost_optimization:
     models_in_blob: true          # Store large models in cheap blob storage
     use_partitioning: true        # Partition tables by date
     use_clustering: true          # Cluster tables by tech_center
-    
+
   # Training optimization
   training:
     semi_annual_frequency: true   # Reduce from quarterly to semi-annual
     parallel_processing: true     # Optimize compute efficiency
     cleanup_old_models: true      # Keep only last 3 versions
-    
+
   # Query optimization
   queries:
     query_cache: true
@@ -410,18 +512,18 @@ monitoring:
       - "silhouette_score"
       - "noise_ratio"
       - "model_size_mb"
-      
+
     prediction:
       - "prediction_latency"
       - "confidence_distribution"
       - "model_version_usage"
       - "error_rate"
-      
+
     cost:
       - "bigquery_slot_usage"
       - "blob_storage_size"
       - "monthly_cost_usd"
-      
+
   # Alerts
   alerts:
     training_failure: true
@@ -438,13 +540,13 @@ performance:
     max_memory_usage_gb: 16.0
     enable_memory_monitoring: true
     batch_processing: true
-    
+
   # Parallel processing
   parallel:
     enable_multiprocessing: true
     max_workers: 4
     chunk_size: 1000
-    
+
   # Caching
   caching:
     enable_caching: true
@@ -459,11 +561,11 @@ security:
   encryption_at_rest: true
   encryption_in_transit: true
   audit_logging: true
-  
+
   # Access control
   rbac_enabled: true
   service_account_rotation: true
-  
+
   # Compliance
   data_retention_days: 730  # 2 years
   pii_handling: "anonymized"
@@ -474,12 +576,12 @@ security:
 logging:
   level: "INFO"
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  
+
   handlers:
     console:
       enabled: true
       level: "INFO"
-      
+
     file:
       enabled: true
       path: "logs/"
@@ -501,14 +603,14 @@ environments:
       container_name: "hdbscan-models-dev"
     training:
       max_incidents_per_training: 10000  # Smaller datasets for dev
-      
+
   staging:
     bigquery:
       dataset: "hdbscan_pipeline_staging"
       maximum_bytes_billed: 5368709120  # 5 GB limit
     blob_storage:
       container_name: "hdbscan-models-staging"
-      
+
   production:
     bigquery:
       dataset: "hdbscan_pipeline"
@@ -520,7 +622,7 @@ environments:
 # EXAMPLE USAGE COMMANDS
 # ===================================================================
 # Training: python training_orchestrator.py --year 2025 --quarter q2
-# Prediction: python prediction_pipeline.py --batch-size 500  
+# Prediction: python prediction_pipeline.py --batch-size 500
 # Analysis: python cluster_analysis.py --tech-center "BT-TC-Data Analytics"
 
 # ===================================================================
@@ -530,4 +632,21 @@ environments:
 # ✅ Semi-annual training reduces operational overhead
 # ✅ 24-month cumulative windows for pattern stability
 # ✅ Versioned model deployment with rollback capability
+# Azure Configuration
+azure:
+  blob_storage:
+    connection_string: "${BLOB_CONNECTION_STRING}"
+    container_name: "hdbscan-models"
+    
+  openai:
+    endpoint: "${AZURE_OPENAI_ENDPOINT}"
+    api_key: "${OPENAI_API_KEY}"
+    api_version: "${AZURE_OPENAI_API_VERSION}"
+    deployment_name: "${AZURE_OPENAI_CHAT_DEPLOYMENT_NAME}"
+
+# Model Storage Configuration  
+model_storage:
+  local_path: "models"
+  blob_storage_enabled: true
+
 # ✅ Enterprise-grade monitoring and security
